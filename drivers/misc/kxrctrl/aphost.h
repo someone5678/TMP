@@ -1,3 +1,13 @@
+/*
+ * SPI controller driver for the nordic52832 SoCs
+ *
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ */
+
 #ifndef __APHOST_H__
 #define __APHOST_H__
 
