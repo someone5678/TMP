@@ -330,7 +330,14 @@ static unsigned int __get_gmu_wfi_config(struct adreno_device *adreno_dev)
 void a6xx_cx_regulator_disable_wait(struct regulator *reg,
 				struct kgsl_device *device, u32 timeout)
 {
+	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
 	u32 offset;
+
+	if (IS_ERR_OR_NULL(reg))
+		return;
+
+	if (ADRENO_QUIRK(adreno_dev, ADRENO_QUIRK_CX_GDSC))
+		regulator_set_mode(reg, REGULATOR_MODE_IDLE);
 
 	offset = adreno_is_a662(ADRENO_DEVICE(device)) ?
 			 A662_GPU_CC_CX_GDSCR : A6XX_GPU_CC_CX_GDSCR;
@@ -340,6 +347,9 @@ void a6xx_cx_regulator_disable_wait(struct regulator *reg,
 		/* Dump the cx regulator consumer list */
 		qcom_clk_dump(NULL, reg, false);
 	}
+
+	if (ADRENO_QUIRK(adreno_dev, ADRENO_QUIRK_CX_GDSC))
+		regulator_set_mode(reg, REGULATOR_MODE_NORMAL);
 }
 
 static void set_holi_sptprac_clock(struct kgsl_device *device, bool enable)
