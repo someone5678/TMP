@@ -1,0 +1,13 @@
+subdirs = [
+    "nordiccommand",
+    "1.0",
+    "vintf",
+    "client",
+    "test",
+]
+
+hidl_package_root {
+    name: "vendor.shadowcreator.hardware.nordic",
+    path: "vendor/qcom/opensource/interfaces/nordic",
+    use_current: true,
+}
