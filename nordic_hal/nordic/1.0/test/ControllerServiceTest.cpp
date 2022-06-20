@@ -1,5 +1,5 @@
 /*
- * controller's IR driver for the nordic52832 SoCs
+ * controller's Test bin for Nordic Service
  *
  *
  * This program is free software; you can redistribute it and/or modify
