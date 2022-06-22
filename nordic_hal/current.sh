@@ -5,4 +5,4 @@ if [ ! -f ${CURRENT_FILE} ]
 then
     touch ${CURRENT_FILE}
 fi
-hidl-gen -Lhash -rvendor.shadowcreator.hardware.nordic:vendor/qcom/opensource/interfaces/nordic $PACKAGE >> ${CURRENT_FILE}
+hidl-gen -Lhash -rvendor.shadowcreator.hardware.nordic:vendor/qcom/opensource/ecosw/nordic_hal $PACKAGE >> ${CURRENT_FILE}

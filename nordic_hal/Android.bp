@@ -8,6 +8,5 @@ subdirs = [
 
 hidl_package_root {
     name: "vendor.shadowcreator.hardware.nordic",
-    path: "vendor/qcom/opensource/interfaces/nordic",
-    use_current: true,
+    path: "vendor/qcom/opensource/ecosw/nordic_hal",
 }

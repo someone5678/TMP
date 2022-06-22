@@ -306,6 +306,10 @@ namespace vendor::shadowcreator::hardware::nordic::implementation {
 
                         cbkt_data = get_data(TX_OF, COMB_TX2END_BW_K101);
 
+                        if (cbkt_data < 0xFFFF) {
+                            continue;
+                        }
+
                         res.analog2D[0].x = (float) (cbkt_data & 0xF);
                         res.analog2D[0].y = (float) ((cbkt_data & 0xF0) >> 4);
 
