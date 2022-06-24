@@ -25,8 +25,8 @@
 #include <android/hidl/memory/1.0/IMemory.h>
 
 #define  ALOGE(...)  __android_log_print(ANDROID_LOG_ERROR,LOG_TAG,__VA_ARGS__)
-#define  ALOGD(...)  __android_log_print(ANDROID_LOG_DEBUG,LOG_TAG,__VA_ARGS__)
-#define  ALOGW(...)  __android_log_print(ANDROID_LOG_INFO,LOG_TAG,__VA_ARGS__)
+#define  ALOGD(...)  // __android_log_print(ANDROID_LOG_DEBUG,LOG_TAG,__VA_ARGS__)
+#define  ALOGW(...)  // __android_log_print(ANDROID_LOG_INFO,LOG_TAG,__VA_ARGS__)
 
 using ::android::hidl::memory::V1_0::IMemory;
 using ::android::hidl::allocator::V1_0::IAllocator;
@@ -322,22 +322,26 @@ namespace vendor::shadowcreator::hardware::nordic::implementation {
 
                         res.battery = (cbkt_data & 0x7000000) >> 24;
 
-                        ALOGW("%s:: get cbkt_data from nordic is=%x", __FUNCTION__, cbkt_data);
-
                         if (gs_data[0] == LEFT) {
-                            m_controller_state_buffer->left_position++;
-                            m_controller_state_buffer->left_position %= MAX_NORDIC_DATA_NUM;
+                            ALOGW("%s:: get cbkt_data from nordic is=%x for left", __FUNCTION__, cbkt_data);
+
+                            int32_t next_position = (m_controller_state_buffer->left_position + 1) % MAX_NORDIC_DATA_NUM;
 
                             copyState(&res,
-                                      &m_controller_state_buffer->left_controller_state[m_controller_state_buffer->left_position]);
+                                      &m_controller_state_buffer->left_controller_state[next_position]);
+
+                            m_controller_state_buffer->left_position = next_position;
 
                             last_left_data_time = current_time;
                         } else {
-                            m_controller_state_buffer->right_position++;
-                            m_controller_state_buffer->right_position %= MAX_NORDIC_DATA_NUM;
+                            ALOGW("%s:: get cbkt_data from nordic is=%x for right", __FUNCTION__, cbkt_data);
+
+                            int32_t next_position = (m_controller_state_buffer->right_position + 1) % MAX_NORDIC_DATA_NUM;
 
                             copyState(&res,
-                                      &m_controller_state_buffer->right_controller_state[m_controller_state_buffer->right_position]);
+                                      &m_controller_state_buffer->right_controller_state[next_position]);
+
+                            m_controller_state_buffer->right_position = next_position;
 
                             last_right_data_time = current_time;
                         }
@@ -357,7 +361,7 @@ namespace vendor::shadowcreator::hardware::nordic::implementation {
                 m_controller_state_buffer->right_position = -1;
             }
 
-            usleep(2000);
+            usleep(5000);
         }
 
         ALOGD("%s:: controller_service_nordic finish ThreadExit=%d", __FUNCTION__, ThreadExit);
