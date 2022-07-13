@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2011-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/bitfield.h>
@@ -173,9 +174,20 @@ static struct page *iommu_get_guard_page(struct kgsl_memdesc *memdesc)
 	return kgsl_guard_page;
 }
 
+static void kgsl_iommu_flush_tlb(struct kgsl_mmu *mmu)
+{
+	struct kgsl_iommu *iommu = &mmu->iommu;
+
+	iommu_flush_iotlb_all(to_iommu_domain(&iommu->user_context));
+
+	/* As LPAC is optional, check LPAC domain is present before flush */
+	if (iommu->lpac_context.domain)
+		iommu_flush_iotlb_all(to_iommu_domain(&iommu->lpac_context));
+}
+
 static int _iopgtbl_unmap(struct kgsl_iommu_pt *pt, u64 gpuaddr, size_t size)
 {
-	struct kgsl_iommu *iommu = &pt->base.mmu->iommu;
+	struct kgsl_device *device = KGSL_MMU_DEVICE(pt->base.mmu);
 	struct io_pgtable_ops *ops = pt->pgtbl_ops;
 
 	while (size) {
@@ -186,12 +198,16 @@ static int _iopgtbl_unmap(struct kgsl_iommu_pt *pt, u64 gpuaddr, size_t size)
 		size -= PAGE_SIZE;
 	}
 
-	iommu_flush_iotlb_all(to_iommu_domain(&iommu->user_context));
+	/* Skip TLB Operations if GPU is in slumber */
+	if (mutex_trylock(&device->mutex)) {
+		if (device->state == KGSL_STATE_SLUMBER) {
+			mutex_unlock(&device->mutex);
+			return 0;
+		}
+		mutex_unlock(&device->mutex);
+	}
 
-	/* As LPAC is optional, check LPAC domain is present before flush */
-	if (iommu->lpac_context.domain)
-		iommu_flush_iotlb_all(to_iommu_domain(&iommu->lpac_context));
-
+	kgsl_iommu_flush_tlb(pt->base.mmu);
 	return 0;
 }
 
@@ -1042,7 +1058,8 @@ static int kgsl_iommu_lpac_fault_handler(struct iommu_domain *domain,
 		"LPAC PAGE FAULT iova=0x%16lx, fsynr0=0x%x, fsynr1=0x%x\n",
 		addr, fsynr0, fsynr1);
 
-	return 0;
+	return kgsl_iommu_fault_handler(mmu, &iommu->lpac_context,
+		addr, flags);
 }
 
 static int kgsl_iommu_secure_fault_handler(struct iommu_domain *domain,
@@ -1102,13 +1119,30 @@ static u64 kgsl_iommu_get_ttbr0(struct kgsl_pagetable *pagetable)
 	return pt->ttbr0;
 }
 
-/* FIXME: This is broken for LPAC.  For now return the default context bank */
-static int kgsl_iommu_get_context_bank(struct kgsl_pagetable *pt)
+static int kgsl_iommu_get_context_bank(struct kgsl_pagetable *pt, struct kgsl_context *context)
 {
 	struct kgsl_iommu *iommu = to_kgsl_iommu(pt);
-	struct iommu_domain *domain = to_iommu_domain(&iommu->user_context);
+	struct iommu_domain *domain;
+
+	if (kgsl_context_is_lpac(context))
+		domain = to_iommu_domain(&iommu->lpac_context);
+	else
+		domain = to_iommu_domain(&iommu->user_context);
 
 	return qcom_iommu_get_context_bank_nr(domain);
+}
+
+static int kgsl_iommu_get_asid(struct kgsl_pagetable *pt, struct kgsl_context *context)
+{
+	struct kgsl_iommu *iommu = to_kgsl_iommu(pt);
+	struct iommu_domain *domain;
+
+	if (kgsl_context_is_lpac(context))
+		domain = to_iommu_domain(&iommu->lpac_context);
+	else
+		domain = to_iommu_domain(&iommu->user_context);
+
+	return qcom_iommu_get_asid_nr(domain);
 }
 
 static void kgsl_iommu_destroy_default_pagetable(struct kgsl_pagetable *pagetable)
@@ -1167,6 +1201,25 @@ static int set_smmu_aperture(struct kgsl_device *device,
 
 	if (ret)
 		dev_err(device->dev, "Unable to set the SMMU aperture: %d. The aperture needs to be set to use per-process pagetables\n",
+			ret);
+
+	return ret;
+}
+
+static int set_smmu_lpac_aperture(struct kgsl_device *device,
+		struct kgsl_iommu_context *context)
+{
+	int ret;
+
+	if (!test_bit(KGSL_MMU_SMMU_APERTURE, &device->mmu.features))
+		return 0;
+
+	ret = qcom_scm_kgsl_set_smmu_lpac_aperture(context->cb_num);
+	if (ret == -EBUSY)
+		ret = qcom_scm_kgsl_set_smmu_lpac_aperture(context->cb_num);
+
+	if (ret)
+		dev_err(device->dev, "Unable to set the LPAC SMMU aperture: %d. The aperture needs to be set to use per-process pagetables\n",
 			ret);
 
 	return ret;
@@ -1458,10 +1511,9 @@ static void _iommu_context_set_prr(struct kgsl_mmu *mmu,
 	wmb();
 }
 
-static void _setup_user_context(struct kgsl_mmu *mmu)
+static void _setup_context(struct kgsl_mmu *mmu, struct kgsl_iommu_context *ctx)
 {
 	unsigned int  sctlr_val;
-	struct kgsl_iommu_context *ctx = &mmu->iommu.user_context;
 
 	sctlr_val = KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_SCTLR);
 
@@ -1504,22 +1556,23 @@ static int kgsl_iommu_start(struct kgsl_mmu *mmu)
 		wmb();
 	}
 
-	/* FIXME: We would need to program stall on fault for LPAC too */
-	_setup_user_context(mmu);
+	_setup_context(mmu, &iommu->user_context);
 
 	_iommu_context_set_prr(mmu, &iommu->user_context);
 	if (mmu->secured)
 		_iommu_context_set_prr(mmu, &iommu->secure_context);
-	_iommu_context_set_prr(mmu, &iommu->lpac_context);
+
+	if (iommu->lpac_context.domain) {
+		_setup_context(mmu, &iommu->lpac_context);
+		_iommu_context_set_prr(mmu, &iommu->lpac_context);
+	}
 
 	kgsl_iommu_disable_clk(mmu);
 	return 0;
 }
 
-static void kgsl_iommu_clear_fsr(struct kgsl_mmu *mmu)
+static void kgsl_iommu_context_clear_fsr(struct kgsl_mmu *mmu, struct kgsl_iommu_context *ctx)
 {
-	struct kgsl_iommu *iommu = &mmu->iommu;
-	struct kgsl_iommu_context  *ctx = &iommu->user_context;
 	unsigned int sctlr_val;
 
 	if (ctx->stalled_on_fault) {
@@ -1543,10 +1596,19 @@ static void kgsl_iommu_clear_fsr(struct kgsl_mmu *mmu)
 	}
 }
 
-static void kgsl_iommu_pagefault_resume(struct kgsl_mmu *mmu, bool terminate)
+static void kgsl_iommu_clear_fsr(struct kgsl_mmu *mmu)
 {
 	struct kgsl_iommu *iommu = &mmu->iommu;
-	struct kgsl_iommu_context *ctx = &iommu->user_context;
+
+	kgsl_iommu_context_clear_fsr(mmu, &iommu->user_context);
+
+	if (iommu->lpac_context.domain)
+		kgsl_iommu_context_clear_fsr(mmu, &iommu->lpac_context);
+}
+
+static void kgsl_iommu_context_pagefault_resume(struct kgsl_iommu *iommu, struct kgsl_iommu_context *ctx,
+			bool terminate)
+{
 	u32 sctlr_val = 0;
 
 	if (!ctx->stalled_on_fault)
@@ -1598,12 +1660,25 @@ clear_fsr:
 	wmb();
 }
 
+static void kgsl_iommu_pagefault_resume(struct kgsl_mmu *mmu, bool terminate)
+{
+	struct kgsl_iommu *iommu = &mmu->iommu;
+
+	kgsl_iommu_context_pagefault_resume(iommu, &iommu->user_context, terminate);
+
+	if (iommu->lpac_context.domain)
+		kgsl_iommu_context_pagefault_resume(iommu, &iommu->lpac_context, terminate);
+}
+
 static u64
-kgsl_iommu_get_current_ttbr0(struct kgsl_mmu *mmu)
+kgsl_iommu_get_current_ttbr0(struct kgsl_mmu *mmu, struct kgsl_context *context)
 {
 	u64 val;
 	struct kgsl_iommu *iommu = &mmu->iommu;
 	struct kgsl_iommu_context *ctx = &iommu->user_context;
+
+	if (kgsl_context_is_lpac(context))
+		ctx = &iommu->lpac_context;
 
 	/*
 	 * We cannot enable or disable the clocks in interrupt context, this
@@ -1629,11 +1704,9 @@ kgsl_iommu_get_current_ttbr0(struct kgsl_mmu *mmu)
  * Check if the new policy indicated by pf_policy is same as current
  * policy, if same then return else set the policy
  */
-static int kgsl_iommu_set_pf_policy(struct kgsl_mmu *mmu,
-				unsigned long pf_policy)
+static int kgsl_iommu_set_pf_policy_ctxt(struct kgsl_mmu *mmu,
+				unsigned long pf_policy, struct kgsl_iommu_context *ctx)
 {
-	struct kgsl_iommu *iommu = &mmu->iommu;
-	struct kgsl_iommu_context *ctx = &iommu->user_context;
 	unsigned int sctlr_val;
 	int cur, new;
 
@@ -1658,6 +1731,19 @@ static int kgsl_iommu_set_pf_policy(struct kgsl_mmu *mmu,
 	KGSL_IOMMU_SET_CTX_REG(ctx, KGSL_IOMMU_CTX_SCTLR, sctlr_val);
 
 	kgsl_iommu_disable_clk(mmu);
+	return 0;
+}
+
+static int kgsl_iommu_set_pf_policy(struct kgsl_mmu *mmu,
+				unsigned long pf_policy)
+{
+	struct kgsl_iommu *iommu = &mmu->iommu;
+
+	kgsl_iommu_set_pf_policy_ctxt(mmu, pf_policy, &iommu->user_context);
+
+	if (iommu->lpac_context.domain)
+		kgsl_iommu_set_pf_policy_ctxt(mmu, pf_policy, &iommu->lpac_context);
+
 	return 0;
 }
 
@@ -2093,6 +2179,7 @@ static int iommu_probe_user_context(struct kgsl_device *device,
 		struct device_node *node)
 {
 	struct kgsl_iommu *iommu = KGSL_IOMMU(device);
+	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
 	struct kgsl_mmu *mmu = &device->mmu;
 	int ret;
 
@@ -2128,7 +2215,9 @@ static int iommu_probe_user_context(struct kgsl_device *device,
 	kgsl_iommu_enable_ttbr0(&iommu->lpac_context,
 		to_iommu_pt(mmu->defaultpagetable));
 
-	/* FIXME: set LPAC SMMU aperture */
+	if (adreno_dev->lpac_enabled)
+		set_smmu_lpac_aperture(device, &iommu->lpac_context);
+
 	return 0;
 }
 
@@ -2394,6 +2483,7 @@ static const struct kgsl_mmu_ops kgsl_iommu_ops = {
 	.mmu_pagefault_resume = kgsl_iommu_pagefault_resume,
 	.mmu_getpagetable = kgsl_iommu_getpagetable,
 	.mmu_map_global = kgsl_iommu_map_global,
+	.mmu_flush_tlb = kgsl_iommu_flush_tlb,
 };
 
 static const struct kgsl_mmu_pt_ops iopgtbl_pt_ops = {
@@ -2405,6 +2495,7 @@ static const struct kgsl_mmu_pt_ops iopgtbl_pt_ops = {
 	.mmu_destroy_pagetable = kgsl_iommu_destroy_pagetable,
 	.get_ttbr0 = kgsl_iommu_get_ttbr0,
 	.get_context_bank = kgsl_iommu_get_context_bank,
+	.get_asid = kgsl_iommu_get_asid,
 	.get_gpuaddr = kgsl_iommu_get_gpuaddr,
 	.put_gpuaddr = kgsl_iommu_put_gpuaddr,
 	.set_svm_region = kgsl_iommu_set_svm_region,
@@ -2418,6 +2509,7 @@ static const struct kgsl_mmu_pt_ops secure_pt_ops = {
 	.mmu_unmap = kgsl_iommu_secure_unmap,
 	.mmu_destroy_pagetable = kgsl_iommu_destroy_pagetable,
 	.get_context_bank = kgsl_iommu_get_context_bank,
+	.get_asid = kgsl_iommu_get_asid,
 	.get_gpuaddr = kgsl_iommu_get_gpuaddr,
 	.put_gpuaddr = kgsl_iommu_put_gpuaddr,
 	.addr_in_range = kgsl_iommu_addr_in_range,
@@ -2429,6 +2521,7 @@ static const struct kgsl_mmu_pt_ops default_pt_ops = {
 	.mmu_destroy_pagetable = kgsl_iommu_destroy_default_pagetable,
 	.get_ttbr0 = kgsl_iommu_get_ttbr0,
 	.get_context_bank = kgsl_iommu_get_context_bank,
+	.get_asid = kgsl_iommu_get_asid,
 	.get_gpuaddr = kgsl_iommu_get_gpuaddr,
 	.put_gpuaddr = kgsl_iommu_put_gpuaddr,
 	.addr_in_range = kgsl_iommu_addr_in_range,
