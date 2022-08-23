@@ -38,6 +38,7 @@ static const u32 gen7_pwrup_reglist[] = {
 	GEN7_GRAS_NC_MODE_CNTL,
 	GEN7_RB_CONTEXT_SWITCH_GMEM_SAVE_RESTORE,
 	GEN7_UCHE_GBIF_GX_CONFIG,
+	GEN7_UCHE_CLIENT_PF,
 };
 
 /* IFPC only static powerup restore list */
@@ -238,6 +239,7 @@ int gen7_init(struct adreno_device *adreno_dev)
 
 	adreno_dev->highest_bank_bit = gen7_core->highest_bank_bit;
 	adreno_dev->gmu_hub_clk_freq = freq ? freq : 150000000;
+	adreno_dev->bcl_data = gen7_core->bcl_data;
 
 	adreno_dev->cooperative_reset = ADRENO_FEATURE(adreno_dev,
 			ADRENO_COOP_RESET);
@@ -437,7 +439,8 @@ int gen7_start(struct adreno_device *adreno_dev)
 {
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	const struct adreno_gen7_core *gen7_core = to_gen7_core(adreno_dev);
-	static bool patch_reglist;
+	u32 bank_bit, mal;
+	struct cpu_gpu_lock *pwrup_lock = adreno_dev->pwrup_reglist->hostptr;
 
 	/* Set up GBIF registers from the GPU core definition */
 	kgsl_regmap_multi_write(&device->regmap, gen7_core->gbif,
@@ -457,12 +460,16 @@ int gen7_start(struct adreno_device *adreno_dev)
 	kgsl_regwrite(device, GEN7_UCHE_WRITE_THRU_BASE_LO, 0xfffff000);
 	kgsl_regwrite(device, GEN7_UCHE_WRITE_THRU_BASE_HI, 0x0001ffff);
 
-	if (adreno_dev->gpucore->gmem_base) {
+	/*
+	 * Some gen7 targets don't use a programmed UCHE GMEM base address,
+	 * so skip programming the register for such targets.
+	 */
+	if (adreno_dev->uche_gmem_base) {
 		kgsl_regwrite(device, GEN7_UCHE_GMEM_RANGE_MIN_LO,
-				adreno_dev->gpucore->gmem_base);
+				adreno_dev->uche_gmem_base);
 		kgsl_regwrite(device, GEN7_UCHE_GMEM_RANGE_MIN_HI, 0x0);
 		kgsl_regwrite(device, GEN7_UCHE_GMEM_RANGE_MAX_LO,
-				adreno_dev->gpucore->gmem_base +
+				adreno_dev->uche_gmem_base +
 				adreno_dev->gpucore->gmem_size - 1);
 		kgsl_regwrite(device, GEN7_UCHE_GMEM_RANGE_MAX_HI, 0x0);
 	}
@@ -476,29 +483,51 @@ int gen7_start(struct adreno_device *adreno_dev)
 			BIT(3) | BIT(2) |
 			FIELD_PREP(GENMASK(1, 0), 2));
 
-	/* Set the AHB default slave response to "ERROR" */
-	kgsl_regwrite(device, GEN7_CP_AHB_CNTL, 0x1);
+	/*
+	 * CP takes care of the restore during IFPC exit. We need to restore at slumber
+	 * boundary as well
+	 */
+	if (pwrup_lock->dynamic_list_len > 0)
+		kgsl_regwrite(device, GEN7_RBBM_PERFCTR_CNTL, 0x1);
 
 	/* Turn on the IFPC counter (countable 4 on XOCLK4) */
 	kgsl_regwrite(device, GEN7_GMU_CX_GMU_POWER_COUNTER_SELECT_1,
 			FIELD_PREP(GENMASK(7, 0), 0x4));
 
+	/* Turn on counter to count total time spent in BCL throttle */
+	if (adreno_dev->bcl_enabled && adreno_is_gen7_2_x(adreno_dev))
+		kgsl_regrmw(device, GEN7_GMU_CX_GMU_POWER_COUNTER_SELECT_1, GENMASK(15, 8),
+				FIELD_PREP(GENMASK(15, 8), 0x26));
+
+	if (of_property_read_u32(device->pdev->dev.of_node,
+		"qcom,min-access-length", &mal))
+		mal = 32;
+
+	if (!WARN_ON(!adreno_dev->highest_bank_bit))
+		bank_bit = (adreno_dev->highest_bank_bit - 13) & 3;
+	else
+		bank_bit = 1;
+
 	kgsl_regwrite(device, GEN7_RB_NC_MODE_CNTL, BIT(11) | BIT(4) |
-			FIELD_PREP(GENMASK(2, 1), 3));
+			((mal == 64) ? BIT(3) : 0) |
+			FIELD_PREP(GENMASK(2, 1), bank_bit));
 	kgsl_regwrite(device, GEN7_TPL1_NC_MODE_CNTL,
-			FIELD_PREP(GENMASK(2, 1), 3));
+			((mal == 64) ? BIT(3) : 0) |
+			FIELD_PREP(GENMASK(2, 1), bank_bit));
 	kgsl_regwrite(device, GEN7_SP_NC_MODE_CNTL,
+			((mal == 64) ? BIT(3) : 0) |
 			FIELD_PREP(GENMASK(5, 4), 2) |
-			FIELD_PREP(GENMASK(2, 1), 3));
+			FIELD_PREP(GENMASK(2, 1), bank_bit));
 	kgsl_regwrite(device, GEN7_GRAS_NC_MODE_CNTL,
-			FIELD_PREP(GENMASK(8, 5), 3));
+			FIELD_PREP(GENMASK(8, 5), bank_bit));
 
 	kgsl_regwrite(device, GEN7_UCHE_MODE_CNTL,
-			FIELD_PREP(GENMASK(22, 21), 3));
+			FIELD_PREP(GENMASK(22, 21), bank_bit));
 	kgsl_regwrite(device, GEN7_RBBM_INTERFACE_HANG_INT_CNTL, BIT(30) |
 			FIELD_PREP(GENMASK(27, 0),
 				gen7_core->hang_detect_cycles));
-	kgsl_regwrite(device, GEN7_UCHE_CLIENT_PF, BIT(0));
+	kgsl_regwrite(device, GEN7_UCHE_CLIENT_PF, BIT(7) |
+			FIELD_PREP(GENMASK(3, 0), adreno_dev->uche_client_pf));
 
 	/* Enable the GMEM save/restore feature for preemption */
 	if (adreno_is_preemption_enabled(adreno_dev))
@@ -548,9 +577,10 @@ int gen7_start(struct adreno_device *adreno_dev)
 	 * miss any register programming when we patch the power up register
 	 * list.
 	 */
-	if (!patch_reglist && (adreno_dev->pwrup_reglist->gpuaddr != 0)) {
+	if (!adreno_dev->patch_reglist &&
+		(adreno_dev->pwrup_reglist->gpuaddr != 0)) {
 		gen7_patch_pwrup_reglist(adreno_dev);
-		patch_reglist = true;
+		adreno_dev->patch_reglist = true;
 	}
 
 	return 0;
@@ -1217,6 +1247,7 @@ int gen7_probe_common(struct platform_device *pdev,
 	adreno_reg_offset_init(gpudev->reg_offsets);
 
 	adreno_dev->hwcg_enabled = true;
+	adreno_dev->uche_client_pf = 1;
 
 	adreno_dev->preempt.preempt_level = 1;
 	adreno_dev->preempt.skipsaverestore = true;
@@ -1500,7 +1531,18 @@ static void gen7_power_stats(struct adreno_device *adreno_dev,
 		c = counter_delta(device, GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_3_L,
 			&busy->throttle_cycles[2]);
 
-		trace_kgsl_bcl_clock_throttling(a, b, c);
+		if (a || b || c)
+			trace_kgsl_bcl_clock_throttling(a, b, c);
+
+		if (adreno_is_gen7_2_x(adreno_dev)) {
+			u32 bcl_throttle = counter_delta(device,
+				GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_5_L, &busy->bcl_throttle);
+			/*
+			 * This counts number of cycles throttled in XO cycles. Convert it to
+			 * micro seconds by dividing by XO freq which is 19.2MHz.
+			 */
+			adreno_dev->bcl_throttle_time_us += ((bcl_throttle * 10) / 192);
+		}
 	}
 }
 
@@ -1548,7 +1590,7 @@ static void gen7_set_isdb_breakpoint_registers(struct adreno_device *adreno_dev)
 
 	if (!device->set_isdb_breakpoint || device->ftbl->is_hwcg_on(device)
 			|| device->qdss_gfx_virt == NULL || !device->force_panic)
-		goto err;
+		return;
 
 	clk = clk_get(&device->pdev->dev, "apb_pclk");
 
@@ -1575,8 +1617,8 @@ static void gen7_set_isdb_breakpoint_registers(struct adreno_device *adreno_dev)
 	isdb_write(device->qdss_gfx_virt, 0x6000);
 	isdb_write(device->qdss_gfx_virt, 0x7000);
 
-	/* gen7_2_0 has additional SPs */
-	if (adreno_is_gen7_2_0(adreno_dev)) {
+	/* gen7_2_x has additional SPs */
+	if (adreno_is_gen7_2_x(adreno_dev)) {
 		isdb_write(device->qdss_gfx_virt, 0x8000);
 		isdb_write(device->qdss_gfx_virt, 0x9000);
 		isdb_write(device->qdss_gfx_virt, 0xa000);
@@ -1613,7 +1655,7 @@ const struct gen7_gpudev adreno_gen7_hwsched_gpudev = {
 		.send_recurring_cmdobj = gen7_hwsched_send_recurring_cmdobj,
 		.perfcounter_remove = gen7_perfcounter_remove,
 		.set_isdb_breakpoint_registers = gen7_set_isdb_breakpoint_registers,
-		.reset_and_snapshot = gen7_hwsched_reset_and_snapshot,
+		.context_destroy = gen7_hwsched_context_destroy,
 	},
 	.hfi_probe = gen7_hwsched_hfi_probe,
 	.hfi_remove = gen7_hwsched_hfi_remove,

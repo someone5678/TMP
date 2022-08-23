@@ -18,16 +18,6 @@
 #include "kgsl_trace.h"
 #include "kgsl_util.h"
 
-void a6xx_hwsched_reset_and_snapshot(struct adreno_device *adreno_dev, int fault)
-{
-	struct a6xx_gmu_device *gmu = to_a6xx_gmu(adreno_dev);
-
-	if (GMU_VER_MINOR(gmu->ver.hfi) < 2)
-		adreno_hwsched_reset_and_snapshot_legacy(adreno_dev, fault);
-	else
-		adreno_hwsched_reset_and_snapshot(adreno_dev, fault);
-}
-
 static size_t adreno_hwsched_snapshot_rb(struct kgsl_device *device, u8 *buf,
 	size_t remain, void *priv)
 {
@@ -299,6 +289,12 @@ void a6xx_hwsched_snapshot(struct adreno_device *adreno_dev,
 		if (entry->desc.mem_kind == HFI_MEMKIND_CSW_PRIV_NON_SECURE)
 			snapshot_preemption_records(device, snapshot,
 				entry->md);
+
+		if (entry->desc.mem_kind == HFI_MEMKIND_PREEMPT_SCRATCH)
+			kgsl_snapshot_add_section(device,
+				KGSL_SNAPSHOT_SECTION_GPU_OBJECT_V2,
+				snapshot, adreno_snapshot_global,
+				entry->md);
 	}
 }
 
@@ -342,6 +338,9 @@ static int a6xx_hwsched_gmu_first_boot(struct adreno_device *adreno_dev)
 
 	a6xx_gmu_version_info(adreno_dev);
 
+	if (GMU_VER_MINOR(gmu->ver.hfi) < 2)
+		set_bit(ADRENO_HWSCHED_CTX_BAD_LEGACY, &adreno_dev->hwsched.flags);
+
 	a6xx_gmu_irq_enable(adreno_dev);
 
 	/* Vote for minimal DDR BW for GMU to init */
@@ -366,13 +365,13 @@ static int a6xx_hwsched_gmu_first_boot(struct adreno_device *adreno_dev)
 	return 0;
 
 err:
+	a6xx_gmu_irq_disable(adreno_dev);
+
 	if (device->gmu_fault) {
 		a6xx_gmu_suspend(adreno_dev);
 
 		return ret;
 	}
-
-	a6xx_gmu_irq_disable(adreno_dev);
 
 clks_gdsc_off:
 	clk_bulk_disable_unprepare(gmu->num_clks, gmu->clks);
@@ -434,13 +433,13 @@ static int a6xx_hwsched_gmu_boot(struct adreno_device *adreno_dev)
 
 	return 0;
 err:
+	a6xx_gmu_irq_disable(adreno_dev);
+
 	if (device->gmu_fault) {
 		a6xx_gmu_suspend(adreno_dev);
 
 		return ret;
 	}
-
-	a6xx_gmu_irq_disable(adreno_dev);
 
 clks_gdsc_off:
 	clk_bulk_disable_unprepare(gmu->num_clks, gmu->clks);
@@ -542,6 +541,7 @@ static int a6xx_hwsched_gmu_power_off(struct adreno_device *adreno_dev)
 	return ret;
 
 error:
+	a6xx_gmu_irq_disable(adreno_dev);
 	a6xx_hwsched_hfi_stop(adreno_dev);
 	a6xx_gmu_suspend(adreno_dev);
 
@@ -587,6 +587,14 @@ static int a6xx_hwsched_gpu_boot(struct adreno_device *adreno_dev)
 		a6xx_disable_gpu_irq(adreno_dev);
 		goto err;
 	}
+
+	/*
+	 * At this point it is safe to assume that we recovered. Setting
+	 * this field allows us to take a new snapshot for the next failure
+	 * if we are prioritizing the first unrecoverable snapshot.
+	 */
+	if (device->snapshot)
+		device->snapshot->recovered = true;
 
 	device->reset_counter++;
 err:
@@ -1143,9 +1151,11 @@ int a6xx_hwsched_reset(struct adreno_device *adreno_dev)
 	if (!test_bit(GMU_PRIV_GPU_STARTED, &gmu->flags))
 		return 0;
 
-	a6xx_hwsched_hfi_stop(adreno_dev);
-
 	a6xx_disable_gpu_irq(adreno_dev);
+
+	a6xx_gmu_irq_disable(adreno_dev);
+
+	a6xx_hwsched_hfi_stop(adreno_dev);
 
 	a6xx_gmu_suspend(adreno_dev);
 

@@ -218,6 +218,7 @@ enum adreno_gpurev {
 	ADRENO_REV_GEN7_0_0 = 0x070000,
 	ADRENO_REV_GEN7_0_1 = 0x070001,
 	ADRENO_REV_GEN7_2_0 = 0x070200,
+	ADRENO_REV_GEN7_2_1 = 0x070201,
 	ADRENO_REV_GEN7_4_0 = 0x070400,
 };
 
@@ -314,6 +315,7 @@ struct adreno_busy_data {
 	unsigned int bif_starved_ram_ch1;
 	unsigned int num_ifpc;
 	unsigned int throttle_cycles[ADRENO_GPMU_THROTTLE_COUNTERS];
+	u32 bcl_throttle;
 };
 
 /**
@@ -413,14 +415,12 @@ struct adreno_power_ops {
  * @patchid: Match for the patch revision of the GPU
  * @features: Common adreno features supported by this core
  * @gpudev: Pointer to the GPU family specific functions for this core
- * @gmem_base: Base address of binning memory (GMEM/OCMEM)
+ * @uche_gmem_alignment: Alignment required for UCHE GMEM base
  * @gmem_size: Amount of binning memory (GMEM/OCMEM) to reserve for the core
  * @bus_width: Bytes transferred in 1 cycle
  */
 struct adreno_gpu_core {
 	enum adreno_gpurev gpurev;
-	/** @chipid: Unique GPU chipid for external identification */
-	u32 chipid;
 	unsigned int core, major, minor, patchid;
 	/**
 	 * @compatible: If specified, use the compatible string to match the
@@ -430,7 +430,7 @@ struct adreno_gpu_core {
 	unsigned long features;
 	const struct adreno_gpudev *gpudev;
 	const struct adreno_perfcounters *perfcounters;
-	unsigned long gmem_base;
+	u32 uche_gmem_alignment;
 	size_t gmem_size;
 	u32 bus_width;
 	/** @snapshot_size: Size of the static snapshot region in bytes */
@@ -535,6 +535,8 @@ struct adreno_device {
 	struct kgsl_device dev;    /* Must be first field in this struct */
 	unsigned long priv;
 	unsigned int chipid;
+	/** @uche_gmem_base: Base address of GMEM for UCHE access */
+	u64 uche_gmem_base;
 	unsigned int cx_misc_len;
 	void __iomem *cx_misc_virt;
 	unsigned long isense_base;
@@ -655,6 +657,24 @@ struct adreno_device {
 	bool perfcounter;
 	/** @gmu_hub_clk_freq: Gmu hub interface clock frequency */
 	u64 gmu_hub_clk_freq;
+	/* @patch_reglist: If false power up register list needs to be patched */
+	bool patch_reglist;
+	/*
+	 * @uche_client_pf: uche_client_pf client register configuration
+	 * for pf debugging
+	 */
+	u32 uche_client_pf;
+	/**
+	 * @bcl_data: bit 0 contains response type for bcl alarms and bits 1:24 controls
+	 * throttle level for bcl alarm levels 0-2. If not set, gmu fw sets default throttle levels.
+	 */
+	u32 bcl_data;
+	/*
+	 * @bcl_debugfs_dir: Debugfs directory node for bcl related nodes
+	 */
+	struct dentry *bcl_debugfs_dir;
+	/** @bcl_throttle_time_us: Total time in us spent in BCL throttling */
+	u32 bcl_throttle_time_us;
 };
 
 /**
@@ -873,9 +893,9 @@ struct adreno_gpudev {
 	 */
 	void (*set_isdb_breakpoint_registers)(struct adreno_device *adreno_dev);
 	/**
-	 * @reset_and_snapshot - Target specific function to do reset and snapshot
+	 * @context_destroy: Target specific function called during context destruction
 	 */
-	void (*reset_and_snapshot) (struct adreno_device *adreno_dev, int fault);
+	void (*context_destroy)(struct adreno_device *adreno_dev, struct adreno_context *drawctxt);
 };
 
 /**
@@ -1157,7 +1177,13 @@ static inline int adreno_is_gen7(struct adreno_device *adreno_dev)
 ADRENO_TARGET(gen7_0_0, ADRENO_REV_GEN7_0_0)
 ADRENO_TARGET(gen7_0_1, ADRENO_REV_GEN7_0_1)
 ADRENO_TARGET(gen7_2_0, ADRENO_REV_GEN7_2_0)
+ADRENO_TARGET(gen7_2_1, ADRENO_REV_GEN7_2_1)
 ADRENO_TARGET(gen7_4_0, ADRENO_REV_GEN7_4_0)
+
+static inline int adreno_is_gen7_2_x(struct adreno_device *adreno_dev)
+{
+	return adreno_is_gen7_2_0(adreno_dev) || adreno_is_gen7_2_1(adreno_dev);
+}
 
 /*
  * adreno_checkreg_off() - Checks the validity of a register enum

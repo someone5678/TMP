@@ -18,7 +18,9 @@
 #include <linux/nvmem-consumer.h>
 #include <linux/soc/qcom/llcc-qcom.h>
 #include <linux/trace.h>
+#include <linux/version.h>
 #include <soc/qcom/dcvs.h>
+#include <soc/qcom/socinfo.h>
 
 #include "adreno.h"
 #include "adreno_a3xx.h"
@@ -464,12 +466,9 @@ _get_gpu_core(struct platform_device *pdev, u32 *chipid)
 					adreno_gpulist[i]->compatible)) {
 			/*
 			 * We matched compat string, set chipid based on
-			 * dtsi, then gpulist, else fail.
+			 * dtsi, else fail.
 			 */
-			if (adreno_get_chipid(pdev, chipid))
-				*chipid = adreno_gpulist[i]->chipid;
-
-			if (*chipid)
+			if (!adreno_get_chipid(pdev, chipid))
 				return adreno_gpulist[i];
 
 			dev_crit(&pdev->dev,
@@ -696,6 +695,7 @@ static void adreno_of_get_initial_pwrlevels(struct kgsl_pwrctrl *pwr,
 	if (level < 0 || level >= pwr->num_pwrlevels || level < pwr->default_pwrlevel)
 		level = pwr->num_pwrlevels - 1;
 
+	pwr->min_render_pwrlevel = level;
 	pwr->min_pwrlevel = level;
 }
 
@@ -749,18 +749,42 @@ static int adreno_of_get_pwrlevels(struct adreno_device *adreno_dev,
 {
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	struct device_node *node, *child;
-	unsigned int bin = 0;
+	int feature_code, pcode;
+	u32 soc_code;
 
 	node = of_find_node_by_name(parent, "qcom,gpu-pwrlevel-bins");
 	if (node == NULL)
 		return adreno_of_get_legacy_pwrlevels(adreno_dev, parent);
 
+	feature_code = max_t(int, socinfo_get_feature_code(), SOCINFO_FC_UNKNOWN);
+	pcode = (feature_code >= SOCINFO_FC_Y0 && feature_code < SOCINFO_FC_INT_RESERVE) ?
+		max_t(int, socinfo_get_pcode(), SOCINFO_PCODE_UNKNOWN) : SOCINFO_PCODE_UNKNOWN;
+
+	soc_code = FIELD_PREP(GENMASK(31, 16), pcode) | FIELD_PREP(GENMASK(15, 0), feature_code);
+
 	for_each_child_of_node(node, child) {
+		bool match = false;
+		int tbl_size;
+		u32 bin = 0;
 
-		if (of_property_read_u32(child, "qcom,speed-bin", &bin))
-			continue;
+		if (!of_property_read_u32(child, "qcom,speed-bin", &bin))
+			match = bin == device->speed_bin;
+		else if (of_get_property(child, "qcom,sku-codes", &tbl_size)) {
+			int num_codes = tbl_size / sizeof(u32);
+			int i;
+			u32 sku_code;
 
-		if (bin == device->speed_bin) {
+			for (i = 0; i < num_codes; i++) {
+				if (!of_property_read_u32_index(child, "qcom,sku-codes",
+								i, &sku_code) &&
+					(sku_code == 0 || soc_code == sku_code)) {
+					match = true;
+					break;
+				}
+			}
+		}
+
+		if (match) {
 			int ret;
 
 			ret = adreno_of_parse_pwrlevels(adreno_dev, child);
@@ -784,8 +808,8 @@ static int adreno_of_get_pwrlevels(struct adreno_device *adreno_dev,
 	}
 
 	dev_err(&device->pdev->dev,
-		"GPU speed_bin:%d mismatch for bin:%d\n",
-		device->speed_bin, bin);
+		"No match for speed_bin:%d or soc_code:0x%x\n",
+		device->speed_bin, soc_code);
 	return -ENODEV;
 }
 
@@ -1110,6 +1134,17 @@ static void adreno_setup_device(struct adreno_device *adreno_dev)
 
 		INIT_LIST_HEAD(&rb->events.group);
 	}
+
+	/*
+	 * Some GPUs needs specific alignment for UCHE GMEM base address.
+	 * Configure UCHE GMEM base based on GMEM size and align it accordingly.
+	 * This needs to be done based on GMEM size to avoid overlap between
+	 * RB and UCHE GMEM range.
+	 */
+	if (adreno_dev->gpucore->uche_gmem_alignment)
+		adreno_dev->uche_gmem_base =
+			ALIGN(adreno_dev->gpucore->gmem_size,
+				adreno_dev->gpucore->uche_gmem_alignment);
 }
 
 static const struct of_device_id adreno_gmu_match[] = {
@@ -1361,6 +1396,8 @@ static void adreno_unbind(struct device *dev)
 
 	if (of_find_matching_node(dev->of_node, adreno_gmu_match))
 		component_unbind_all(dev, NULL);
+
+	kgsl_bus_close(device);
 
 	if (device->num_l3_pwrlevels != 0)
 		qcom_dcvs_unregister_voter(KGSL_L3_DEVICE, DCVS_L3,
@@ -1942,7 +1979,7 @@ static int adreno_prop_device_info(struct kgsl_device *device,
 		.device_id = device->id + 1,
 		.chip_id = adreno_dev->chipid,
 		.mmu_enabled = kgsl_mmu_has_feature(device, KGSL_MMU_PAGED),
-		.gmem_gpubaseaddr = adreno_dev->gpucore->gmem_base,
+		.gmem_gpubaseaddr = 0,
 		.gmem_sizebytes = adreno_dev->gpucore->gmem_size,
 	};
 
@@ -2020,9 +2057,9 @@ static int adreno_prop_uche_gmem_addr(struct kgsl_device *device,
 		struct kgsl_device_getproperty *param)
 {
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
-	u64 vaddr = adreno_dev->gpucore->gmem_base;
 
-	return copy_prop(param, &vaddr, sizeof(vaddr));
+	return copy_prop(param, &adreno_dev->uche_gmem_base,
+		sizeof(adreno_dev->uche_gmem_base));
 }
 
 static int adreno_prop_ucode_version(struct kgsl_device *device,
@@ -2082,6 +2119,8 @@ static int adreno_prop_u32(struct kgsl_device *device,
 		val = device->speed_bin;
 	else if (param->type == KGSL_PROP_VK_DEVICE_ID)
 		val = adreno_get_vk_device_id(device);
+	else if (param->type == KGSL_PROP_IS_LPAC_ENABLED)
+		val = adreno_dev->lpac_enabled ? 1 : 0;
 
 	return copy_prop(param, &val, sizeof(val));
 }
@@ -2107,6 +2146,7 @@ static const struct {
 	{ KGSL_PROP_GAMING_BIN, adreno_prop_gaming_bin },
 	{ KGSL_PROP_GPU_MODEL, adreno_prop_gpu_model},
 	{ KGSL_PROP_VK_DEVICE_ID, adreno_prop_u32},
+	{ KGSL_PROP_IS_LPAC_ENABLED, adreno_prop_u32 },
 };
 
 static int adreno_getproperty(struct kgsl_device *device,
@@ -2881,7 +2921,7 @@ static inline bool _verify_ib(struct kgsl_device_private *dev_priv,
 
 	/* The maximum allowable size for an IB in the CP is 0xFFFFF dwords */
 	if (ib->size == 0 || ((ib->size >> 2) > 0xFFFFF)) {
-		pr_context(device, context, "ctxt %d invalid ib size %lld\n",
+		pr_context(device, context, "ctxt %u invalid ib size %lld\n",
 			context->id, ib->size);
 		return false;
 	}
@@ -2889,7 +2929,7 @@ static inline bool _verify_ib(struct kgsl_device_private *dev_priv,
 	/* Make sure that the address is in range and dword aligned */
 	if (!kgsl_mmu_gpuaddr_in_range(private->pagetable, ib->gpuaddr,
 		ib->size) || !IS_ALIGNED(ib->gpuaddr, 4)) {
-		pr_context(device, context, "ctxt %d invalid ib gpuaddr %llX\n",
+		pr_context(device, context, "ctxt %u invalid ib gpuaddr %llX\n",
 			context->id, ib->gpuaddr);
 		return false;
 	}
@@ -3316,3 +3356,6 @@ module_exit(kgsl_3d_exit);
 MODULE_DESCRIPTION("3D Graphics driver");
 MODULE_LICENSE("GPL v2");
 MODULE_SOFTDEP("pre: qcom-arm-smmu-mod nvmem_qfprom");
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0))
+MODULE_IMPORT_NS(DMA_BUF);
+#endif

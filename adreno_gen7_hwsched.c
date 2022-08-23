@@ -17,16 +17,6 @@
 #include "kgsl_trace.h"
 #include "kgsl_util.h"
 
-void gen7_hwsched_reset_and_snapshot(struct adreno_device *adreno_dev, int fault)
-{
-	struct gen7_gmu_device *gmu = to_gen7_gmu(adreno_dev);
-
-	if (GMU_VER_MINOR(gmu->ver.hfi) < 2)
-		adreno_hwsched_reset_and_snapshot_legacy(adreno_dev, fault);
-	else
-		adreno_hwsched_reset_and_snapshot(adreno_dev, fault);
-}
-
 static size_t adreno_hwsched_snapshot_rb(struct kgsl_device *device, u8 *buf,
 	size_t remain, void *priv)
 {
@@ -239,6 +229,26 @@ static bool parse_payload_rb(struct adreno_device *adreno_dev,
 	return ret;
 }
 
+static int snapshot_context_queue(int id, void *ptr, void *data)
+{
+	struct kgsl_snapshot *snapshot = data;
+	struct kgsl_context *context = ptr;
+	struct adreno_context *drawctxt = ADRENO_CONTEXT(context);
+	struct gmu_mem_type_desc desc;
+
+	if (!context->gmu_registered)
+		return 0;
+
+	desc.memdesc = &drawctxt->gmu_context_queue;
+	desc.type = SNAPSHOT_GMU_MEM_CONTEXT_QUEUE;
+
+	kgsl_snapshot_add_section(context->device,
+		KGSL_SNAPSHOT_SECTION_GMU_MEMORY,
+		snapshot, gen7_snapshot_gmu_mem, &desc);
+
+	return 0;
+}
+
 void gen7_hwsched_snapshot(struct adreno_device *adreno_dev,
 	struct kgsl_snapshot *snapshot)
 {
@@ -297,9 +307,22 @@ void gen7_hwsched_snapshot(struct adreno_device *adreno_dev,
 		if (entry->desc.mem_kind == HFI_MEMKIND_CSW_PRIV_NON_SECURE)
 			snapshot_preemption_records(device, snapshot,
 				entry->md);
+
+		if (entry->desc.mem_kind == HFI_MEMKIND_PREEMPT_SCRATCH)
+			kgsl_snapshot_add_section(device,
+				KGSL_SNAPSHOT_SECTION_GPU_OBJECT_V2,
+				snapshot, adreno_snapshot_global,
+				entry->md);
 	}
 
 	adreno_hwsched_parse_fault_cmdobj(adreno_dev, snapshot);
+
+	if (!adreno_hwsched_context_queue_enabled(adreno_dev))
+		return;
+
+	read_lock(&device->context_lock);
+	idr_for_each(&device->context_idr, snapshot_context_queue, snapshot);
+	read_unlock(&device->context_lock);
 }
 
 static int gen7_hwsched_gmu_first_boot(struct adreno_device *adreno_dev)
@@ -342,6 +365,9 @@ static int gen7_hwsched_gmu_first_boot(struct adreno_device *adreno_dev)
 
 	gen7_gmu_version_info(adreno_dev);
 
+	if (GMU_VER_MINOR(gmu->ver.hfi) < 2)
+		set_bit(ADRENO_HWSCHED_CTX_BAD_LEGACY, &adreno_dev->hwsched.flags);
+
 	gen7_gmu_irq_enable(adreno_dev);
 
 	/* Vote for minimal DDR BW for GMU to init */
@@ -357,6 +383,11 @@ static int gen7_hwsched_gmu_first_boot(struct adreno_device *adreno_dev)
 	if (ret)
 		goto err;
 
+	if (GMU_VER_MINOR(gmu->ver.hfi) >= 3) {
+		if (gen7_hwsched_hfi_get_value(adreno_dev, HFI_VALUE_CONTEXT_QUEUE) == 1)
+			set_bit(ADRENO_HWSCHED_CONTEXT_QUEUE, &adreno_dev->hwsched.flags);
+	}
+
 	icc_set_bw(pwr->icc_path, 0, 0);
 
 	device->gmu_fault = false;
@@ -369,13 +400,13 @@ static int gen7_hwsched_gmu_first_boot(struct adreno_device *adreno_dev)
 	return 0;
 
 err:
+	gen7_gmu_irq_disable(adreno_dev);
+
 	if (device->gmu_fault) {
 		gen7_gmu_suspend(adreno_dev);
 
 		return ret;
 	}
-
-	gen7_gmu_irq_disable(adreno_dev);
 
 clks_gdsc_off:
 	clk_bulk_disable_unprepare(gmu->num_clks, gmu->clks);
@@ -437,13 +468,13 @@ static int gen7_hwsched_gmu_boot(struct adreno_device *adreno_dev)
 
 	return 0;
 err:
+	gen7_gmu_irq_disable(adreno_dev);
+
 	if (device->gmu_fault) {
 		gen7_gmu_suspend(adreno_dev);
 
 		return ret;
 	}
-
-	gen7_gmu_irq_disable(adreno_dev);
 
 clks_gdsc_off:
 	clk_bulk_disable_unprepare(gmu->num_clks, gmu->clks);
@@ -543,6 +574,7 @@ static int gen7_hwsched_gmu_power_off(struct adreno_device *adreno_dev)
 	return ret;
 
 error:
+	gen7_gmu_irq_disable(adreno_dev);
 	gen7_hwsched_hfi_stop(adreno_dev);
 	gen7_gmu_suspend(adreno_dev);
 
@@ -591,6 +623,14 @@ static int gen7_hwsched_gpu_boot(struct adreno_device *adreno_dev)
 		gen7_disable_gpu_irq(adreno_dev);
 		goto err;
 	}
+
+	/*
+	 * At this point it is safe to assume that we recovered. Setting
+	 * this field allows us to take a new snapshot for the next failure
+	 * if we are prioritizing the first unrecoverable snapshot.
+	 */
+	if (device->snapshot)
+		device->snapshot->recovered = true;
 
 	device->reset_counter++;
 err:
@@ -769,6 +809,31 @@ static int gen7_hwsched_first_boot(struct adreno_device *adreno_dev)
 	return 0;
 }
 
+static void reset_preemption_records(struct adreno_device *adreno_dev)
+{
+	struct gen7_hwsched_hfi *hw_hfi = to_gen7_hwsched_hfi(adreno_dev);
+	static struct kgsl_memdesc *preemption_md = NULL;
+	u32 i;
+
+	if (!adreno_is_preemption_enabled(adreno_dev))
+		return;
+
+	if (preemption_md) {
+		memset(preemption_md->hostptr, 0x0, preemption_md->size);
+		return;
+	}
+
+	for (i = 0; i < hw_hfi->mem_alloc_entries; i++) {
+		struct hfi_mem_alloc_desc *desc = &hw_hfi->mem_alloc_table[i].desc;
+
+		if (desc->mem_kind == HFI_MEMKIND_CSW_PRIV_NON_SECURE) {
+			preemption_md = hw_hfi->mem_alloc_table[i].md;
+			memset(preemption_md->hostptr, 0x0, preemption_md->size);
+			return;
+		}
+	}
+}
+
 static int gen7_hwsched_power_off(struct adreno_device *adreno_dev)
 {
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
@@ -826,6 +891,13 @@ no_gx_power:
 	kgsl_pwrscale_sleep(device);
 
 	kgsl_pwrctrl_clear_l3_vote(device);
+
+	/*
+	 * Reset the context records so that CP can start
+	 * at the correct read pointer for BV thread after
+	 * coming out of slumber.
+	 */
+	reset_preemption_records(adreno_dev);
 
 	trace_kgsl_pwr_set_state(device, KGSL_STATE_SLUMBER);
 
@@ -1143,18 +1215,13 @@ int gen7_hwsched_reset(struct adreno_device *adreno_dev)
 	if (!test_bit(GMU_PRIV_GPU_STARTED, &gmu->flags))
 		return 0;
 
-	gen7_hwsched_hfi_stop(adreno_dev);
-
 	gen7_disable_gpu_irq(adreno_dev);
 
-	gen7_gmu_suspend(adreno_dev);
+	gen7_gmu_irq_disable(adreno_dev);
 
-	/*
-	 * In some corner cases, it is possible that GMU put TS_RETIRE
-	 * on the msgq after we have turned off gmu interrupts. Hence,
-	 * drain the queue one last time before we reboot the GMU.
-	 */
-	gen7_hwsched_process_msgq(adreno_dev);
+	gen7_hwsched_hfi_stop(adreno_dev);
+
+	gen7_gmu_suspend(adreno_dev);
 
 	clear_bit(GMU_PRIV_GPU_STARTED, &gmu->flags);
 
@@ -1214,6 +1281,8 @@ int gen7_hwsched_probe(struct platform_device *pdev,
 
 	if (ADRENO_FEATURE(adreno_dev, ADRENO_LPAC))
 		adreno_dev->lpac_enabled = true;
+
+	kgsl_mmu_set_feature(device, KGSL_MMU_PAGEFAULT_TERMINATE);
 
 	return adreno_hwsched_init(adreno_dev, &gen7_hwsched_ops);
 }

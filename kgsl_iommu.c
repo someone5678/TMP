@@ -84,8 +84,7 @@ static struct kgsl_iommu_pt *to_iommu_pt(struct kgsl_pagetable *pagetable)
 static u32 get_llcc_flags(struct kgsl_mmu *mmu)
 {
 	if (mmu->subtype == KGSL_IOMMU_SMMU_V500)
-		return (test_bit(KGSL_MMU_IO_COHERENT, &mmu->features)) ?
-			0 : IOMMU_USE_LLC_NWA;
+		return IOMMU_USE_LLC_NWA;
 	else
 		return IOMMU_USE_UPSTREAM_HINT;
 }
@@ -234,7 +233,7 @@ static size_t _iopgtbl_map_pages(struct kgsl_iommu_pt *pt, u64 gpuaddr,
 	return mapped;
 }
 
-static int _iopgtbl_map_sg(struct kgsl_iommu_pt *pt, u64 gpuaddr,
+static size_t _iopgtbl_map_sg(struct kgsl_iommu_pt *pt, u64 gpuaddr,
 		struct sg_table *sgt, int prot)
 {
 	struct io_pgtable_ops *ops = pt->pgtbl_ops;
@@ -273,6 +272,7 @@ kgsl_iopgtbl_map_child(struct kgsl_pagetable *pt, struct kgsl_memdesc *memdesc,
 	struct kgsl_iommu_pt *iommu_pt = to_iommu_pt(pt);
 	struct sg_table sgt;
 	u32 flags;
+	size_t mapped;
 	int ret;
 
 	ret = get_sg_from_child(&sgt, child, child_offset, length);
@@ -282,11 +282,11 @@ kgsl_iopgtbl_map_child(struct kgsl_pagetable *pt, struct kgsl_memdesc *memdesc,
 	/* Inherit the flags from the child for this mapping */
 	flags = _iommu_get_protection_flags(pt->mmu, child);
 
-	ret = _iopgtbl_map_sg(iommu_pt, memdesc->gpuaddr + offset, &sgt, flags);
+	mapped = _iopgtbl_map_sg(iommu_pt, memdesc->gpuaddr + offset, &sgt, flags);
 
 	sg_free_table(&sgt);
 
-	return ret ? 0 : -ENOMEM;
+	return mapped ? 0 : -ENOMEM;
 }
 
 
@@ -947,7 +947,7 @@ static void kgsl_iommu_print_fault(struct kgsl_mmu *mmu,
 }
 
 /*
- * Return true if the IOMMU should stall and trigger a snasphot on a pagefault
+ * Return true if the IOMMU should stall and trigger a snapshot on a pagefault
  */
 static bool kgsl_iommu_check_stall_on_fault(struct kgsl_iommu_context *ctx,
 	struct kgsl_mmu *mmu, int flags)
@@ -958,6 +958,9 @@ static bool kgsl_iommu_check_stall_on_fault(struct kgsl_iommu_context *ctx,
 		return false;
 
 	if (!test_bit(KGSL_FT_PAGEFAULT_GPUHALT_ENABLE, &mmu->pfpolicy))
+		return false;
+
+	if (test_bit(KGSL_MMU_PAGEFAULT_TERMINATE, &mmu->features))
 		return false;
 
 	/*
@@ -1286,16 +1289,13 @@ static struct kgsl_pagetable *kgsl_iommu_default_pagetable(struct kgsl_mmu *mmu)
 	iommu_pt->base.pt_ops = &default_pt_ops;
 
 	if (test_bit(KGSL_MMU_64BIT, &mmu->features)) {
-		iommu_pt->base.compat_va_start = KGSL_IOMMU_SVM_BASE32;
-		if (test_bit(KGSL_MMU_IOPGTABLE, &mmu->features))
-			iommu_pt->base.compat_va_end = KGSL_MEMSTORE_TOKEN_ADDRESS;
-		else
-			iommu_pt->base.compat_va_end = KGSL_IOMMU_GLOBAL_MEM_BASE64;
+		iommu_pt->base.compat_va_start = KGSL_IOMMU_SVM_BASE32(mmu);
+		iommu_pt->base.compat_va_end = KGSL_IOMMU_SVM_END32(mmu);
 		iommu_pt->base.va_start = KGSL_IOMMU_VA_BASE64;
 		iommu_pt->base.va_end = KGSL_IOMMU_VA_END64;
 
 	} else {
-		iommu_pt->base.va_start = KGSL_IOMMU_SVM_BASE32;
+		iommu_pt->base.va_start = KGSL_IOMMU_SVM_BASE32(mmu);
 		iommu_pt->base.va_end = KGSL_IOMMU_GLOBAL_MEM_BASE(mmu);
 		iommu_pt->base.compat_va_start = iommu_pt->base.va_start;
 		iommu_pt->base.compat_va_end = iommu_pt->base.va_end;
@@ -1375,26 +1375,26 @@ static struct kgsl_pagetable *kgsl_iopgtbl_pagetable(struct kgsl_mmu *mmu, u32 n
 	pt->base.pt_ops = &iopgtbl_pt_ops;
 
 	if (test_bit(KGSL_MMU_64BIT, &mmu->features)) {
-		pt->base.compat_va_start = KGSL_IOMMU_SVM_BASE32;
-		pt->base.compat_va_end = KGSL_MEMSTORE_TOKEN_ADDRESS;
+		pt->base.compat_va_start = KGSL_IOMMU_SVM_BASE32(mmu);
+		pt->base.compat_va_end = KGSL_IOMMU_SVM_END32(mmu);
 		pt->base.va_start = KGSL_IOMMU_VA_BASE64;
 		pt->base.va_end = KGSL_IOMMU_VA_END64;
 
 		if (is_compat_task()) {
-			pt->base.svm_start = KGSL_IOMMU_SVM_BASE32;
-			pt->base.svm_end = KGSL_MEMSTORE_TOKEN_ADDRESS;
+			pt->base.svm_start = KGSL_IOMMU_SVM_BASE32(mmu);
+			pt->base.svm_end = KGSL_IOMMU_SVM_END32(mmu);
 		} else {
 			pt->base.svm_start = KGSL_IOMMU_SVM_BASE64;
 			pt->base.svm_end = KGSL_IOMMU_SVM_END64;
 		}
 
 	} else {
-		pt->base.va_start = KGSL_IOMMU_SVM_BASE32;
+		pt->base.va_start = KGSL_IOMMU_SVM_BASE32(mmu);
 		pt->base.va_end = KGSL_IOMMU_GLOBAL_MEM_BASE(mmu);
 		pt->base.compat_va_start = pt->base.va_start;
 		pt->base.compat_va_end = pt->base.va_end;
-		pt->base.svm_start = KGSL_IOMMU_SVM_BASE32;
-		pt->base.svm_end = KGSL_IOMMU_SVM_END32;
+		pt->base.svm_start = KGSL_IOMMU_SVM_BASE32(mmu);
+		pt->base.svm_end = KGSL_IOMMU_SVM_END32(mmu);
 	}
 
 	ret = kgsl_iopgtbl_alloc(&iommu->user_context, pt);
@@ -1511,26 +1511,37 @@ static void _iommu_context_set_prr(struct kgsl_mmu *mmu,
 	wmb();
 }
 
-static void _setup_context(struct kgsl_mmu *mmu, struct kgsl_iommu_context *ctx)
+static void kgsl_iommu_configure_gpu_sctlr(struct kgsl_mmu *mmu,
+		unsigned long pf_policy,
+		struct kgsl_iommu_context *ctx)
 {
-	unsigned int  sctlr_val;
-
-	sctlr_val = KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_SCTLR);
+	u32 sctlr_val;
 
 	/*
 	 * If pagefault policy is GPUHALT_ENABLE,
-	 * 1) Program CFCFG to 1 to enable STALL mode
-	 * 2) Program HUPCF to 0 (Stall or terminate subsequent
-	 *    transactions in the presence of an outstanding fault)
+	 *   If terminate feature flag is enabled:
+	 *     1) Program CFCFG to 0 to terminate the faulting transaction
+	 *     2) Program HUPCF to 0 (terminate subsequent transactions
+	 *        in the presence of an outstanding fault)
+	 *   Else configure stall:
+	 *     1) Program CFCFG to 1 to enable STALL mode
+	 *     2) Program HUPCF to 0 (Stall subsequent
+	 *        transactions in the presence of an outstanding fault)
 	 * else
 	 * 1) Program CFCFG to 0 to disable STALL mode (0=Terminate)
 	 * 2) Program HUPCF to 1 (Process subsequent transactions
 	 *    independently of any outstanding fault)
 	 */
 
-	if (test_bit(KGSL_FT_PAGEFAULT_GPUHALT_ENABLE, &mmu->pfpolicy)) {
-		sctlr_val |= (0x1 << KGSL_IOMMU_SCTLR_CFCFG_SHIFT);
-		sctlr_val &= ~(0x1 << KGSL_IOMMU_SCTLR_HUPCF_SHIFT);
+	sctlr_val = KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_SCTLR);
+	if (test_bit(KGSL_FT_PAGEFAULT_GPUHALT_ENABLE, &pf_policy)) {
+		if (test_bit(KGSL_MMU_PAGEFAULT_TERMINATE, &mmu->features)) {
+			sctlr_val &= ~(0x1 << KGSL_IOMMU_SCTLR_CFCFG_SHIFT);
+			sctlr_val &= ~(0x1 << KGSL_IOMMU_SCTLR_HUPCF_SHIFT);
+		} else {
+			sctlr_val |= (0x1 << KGSL_IOMMU_SCTLR_CFCFG_SHIFT);
+			sctlr_val &= ~(0x1 << KGSL_IOMMU_SCTLR_HUPCF_SHIFT);
+		}
 	} else {
 		sctlr_val &= ~(0x1 << KGSL_IOMMU_SCTLR_CFCFG_SHIFT);
 		sctlr_val |= (0x1 << KGSL_IOMMU_SCTLR_HUPCF_SHIFT);
@@ -1556,15 +1567,15 @@ static int kgsl_iommu_start(struct kgsl_mmu *mmu)
 		wmb();
 	}
 
-	_setup_context(mmu, &iommu->user_context);
+	kgsl_iommu_configure_gpu_sctlr(mmu, mmu->pfpolicy, &iommu->user_context);
 
 	_iommu_context_set_prr(mmu, &iommu->user_context);
 	if (mmu->secured)
 		_iommu_context_set_prr(mmu, &iommu->secure_context);
 
 	if (iommu->lpac_context.domain) {
-		_setup_context(mmu, &iommu->lpac_context);
 		_iommu_context_set_prr(mmu, &iommu->lpac_context);
+		kgsl_iommu_configure_gpu_sctlr(mmu, mmu->pfpolicy, &iommu->lpac_context);
 	}
 
 	kgsl_iommu_disable_clk(mmu);
@@ -1707,8 +1718,8 @@ kgsl_iommu_get_current_ttbr0(struct kgsl_mmu *mmu, struct kgsl_context *context)
 static int kgsl_iommu_set_pf_policy_ctxt(struct kgsl_mmu *mmu,
 				unsigned long pf_policy, struct kgsl_iommu_context *ctx)
 {
-	unsigned int sctlr_val;
 	int cur, new;
+	struct kgsl_iommu *iommu = &mmu->iommu;
 
 	cur = test_bit(KGSL_FT_PAGEFAULT_GPUHALT_ENABLE, &mmu->pfpolicy);
 	new = test_bit(KGSL_FT_PAGEFAULT_GPUHALT_ENABLE, &pf_policy);
@@ -1718,17 +1729,9 @@ static int kgsl_iommu_set_pf_policy_ctxt(struct kgsl_mmu *mmu,
 
 	kgsl_iommu_enable_clk(mmu);
 
-	sctlr_val = KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_SCTLR);
-
-	if (test_bit(KGSL_FT_PAGEFAULT_GPUHALT_ENABLE, &pf_policy)) {
-		sctlr_val |= (0x1 << KGSL_IOMMU_SCTLR_CFCFG_SHIFT);
-		sctlr_val &= ~(0x1 << KGSL_IOMMU_SCTLR_HUPCF_SHIFT);
-	} else {
-		sctlr_val &= ~(0x1 << KGSL_IOMMU_SCTLR_CFCFG_SHIFT);
-		sctlr_val |= (0x1 << KGSL_IOMMU_SCTLR_HUPCF_SHIFT);
-	}
-
-	KGSL_IOMMU_SET_CTX_REG(ctx, KGSL_IOMMU_CTX_SCTLR, sctlr_val);
+	kgsl_iommu_configure_gpu_sctlr(mmu, pf_policy, &iommu->user_context);
+	if (iommu->lpac_context.domain)
+		kgsl_iommu_configure_gpu_sctlr(mmu, pf_policy, &iommu->lpac_context);
 
 	kgsl_iommu_disable_clk(mmu);
 	return 0;
