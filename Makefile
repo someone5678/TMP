@@ -1,4 +1,6 @@
-KBUILD_OPTIONS+= MMRM_ROOT=$(KERNEL_SRC)/$(M)
+CUR_MKFILE = $(abspath $(lastword $(MAKEFILE_LIST)))
+MMRM_ROOT = $(dir $(CUR_MKFILE))
+KBUILD_OPTIONS+= MMRM_ROOT=$(MMRM_ROOT)
 
 all: modules
 
