@@ -28,7 +28,6 @@
 #include <linux/input/mt.h>
 #include <linux/of_gpio.h>
 #include <linux/of_irq.h>
-#include <linux/version.h>
 
 #if defined(CONFIG_DRM)
 #include <linux/soc/qcom/panel_event_notifier.h>
@@ -1606,11 +1605,7 @@ err_register_fb_notif_failed:
  * return:
  *     Executive outcomes. 0---succeed.
  *******************************************************/
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
-static void  nvt_ts_remove(struct i2c_client *client)
-#else
-static int32_t  nvt_ts_remove(struct i2c_client *client)
-#endif
+static int32_t nvt_ts_remove(struct i2c_client *client)
 {
 	NVT_LOG("Removing driver...\n");
 
@@ -1677,9 +1672,7 @@ static int32_t  nvt_ts_remove(struct i2c_client *client)
 		ts = NULL;
 	}
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0))
 	return 0;
-#endif
 }
 
 static void nvt_ts_shutdown(struct i2c_client *client)

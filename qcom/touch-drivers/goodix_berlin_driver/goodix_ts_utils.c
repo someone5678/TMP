@@ -71,8 +71,7 @@ int checksum_cmp(const u8 *data, int size, int mode)
 	u32 i;
 
 	if (((mode == CHECKSUM_MODE_U8_LE) && (size < 2)) ||
-	    ((mode == CHECKSUM_MODE_U16_LE) && (size < 4)) ||
-	    ((mode == CHECKSUM_MODE_U16_LE) && (size % 2 != 0)))
+		((mode == CHECKSUM_MODE_U16_LE) && (size < 4)))
 		return 1;
 
 	if (mode == CHECKSUM_MODE_U8_LE) {

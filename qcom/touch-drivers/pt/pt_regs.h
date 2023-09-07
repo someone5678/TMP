@@ -45,16 +45,12 @@
 #define CONFIG_DRM
 #endif
 
-#if IS_ENABLED(CONFIG_QCOM_PANEL_EVENT_NOTIFIER)
-#define CONFIG_PANEL_NOTIFIER
-#endif
-
 #include <linux/device.h>
 #include <linux/fb.h>
 #include <linux/notifier.h>
 #ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/earlysuspend.h>
-#elif defined(CONFIG_DRM) || defined(CONFIG_PANEL_NOTIFIER)
+#elif defined(CONFIG_DRM)
 #include <drm/drm_panel.h>
 #endif
 
@@ -1525,7 +1521,7 @@ struct pt_core_data {
 	int raw_cmd_status;
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	struct early_suspend es;
-#elif defined(CONFIG_FB) || defined(CONFIG_DRM) || defined(CONFIG_PANEL_NOTIFIER)
+#elif defined(CONFIG_FB) || defined(CONFIG_DRM)
 	struct notifier_block fb_notifier;
 	enum pt_fb_state fb_state;
 #endif
