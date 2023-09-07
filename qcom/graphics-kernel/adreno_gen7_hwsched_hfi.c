@@ -6,6 +6,7 @@
 
 #include <linux/iommu.h>
 #include <linux/sched/clock.h>
+#include <soc/qcom/msm_performance.h>
 
 #include "adreno.h"
 #include "adreno_gen7.h"
@@ -17,6 +18,7 @@
 #include "kgsl_eventlog.h"
 #include "kgsl_pwrctrl.h"
 #include "kgsl_trace.h"
+#include "kgsl_util.h"
 
 #define HFI_QUEUE_MAX (HFI_QUEUE_DEFAULT_CNT + HFI_QUEUE_DISPATCH_MAX_CNT)
 
@@ -697,7 +699,6 @@ static irqreturn_t gen7_hwsched_hfi_handler(int irq, void *data)
 }
 
 #define HFI_IRQ_MSGQ_MASK BIT(0)
-#define HFI_RSP_TIMEOUT 100 /* msec */
 
 static int wait_ack_completion(struct adreno_device *adreno_dev,
 		struct pending_cmd *ack)
@@ -1133,6 +1134,22 @@ poll:
 	return rc;
 }
 
+static void reset_hfi_mem_records(struct adreno_device *adreno_dev)
+{
+	struct gen7_hwsched_hfi *hw_hfi = to_gen7_hwsched_hfi(adreno_dev);
+	struct kgsl_memdesc *md = NULL;
+	u32 i;
+
+	for (i = 0; i < hw_hfi->mem_alloc_entries; i++) {
+		struct hfi_mem_alloc_desc *desc = &hw_hfi->mem_alloc_table[i].desc;
+
+		if (desc->flags & HFI_MEMFLAG_HOST_INIT) {
+			md = hw_hfi->mem_alloc_table[i].md;
+			memset(md->hostptr, 0x0, md->size);
+		}
+	}
+}
+
 static void reset_hfi_queues(struct adreno_device *adreno_dev)
 {
 	struct gen7_gmu_device *gmu = to_gen7_gmu(adreno_dev);
@@ -1181,6 +1198,11 @@ void gen7_hwsched_hfi_stop(struct adreno_device *adreno_dev)
 
 	clear_bit(GMU_PRIV_HFI_STARTED, &gmu->flags);
 
+	/*
+	 * Reset the hfi host access memory records, As GMU expects hfi memory
+	 * records to be clear in bootup.
+	 */
+	reset_hfi_mem_records(adreno_dev);
 }
 
 static void enable_async_hfi(struct adreno_device *adreno_dev)
@@ -1412,7 +1434,17 @@ int gen7_hwsched_hfi_start(struct adreno_device *adreno_dev)
 
 	/* Request default BW vote */
 	ret = kgsl_pwrctrl_axi(device, true);
+	if (ret)
+		goto err;
 
+	/* Switch to min GMU clock */
+	gen7_rdpm_cx_freq_update(gmu, gmu->freqs[0] / 1000);
+
+	ret = kgsl_clk_set_rate(gmu->clks, gmu->num_clks, "gmu_clk",
+			gmu->freqs[0]);
+	if (ret)
+		dev_err(&gmu->pdev->dev, "GMU clock:%d set failed:%d\n",
+			gmu->freqs[0], ret);
 err:
 	if (ret)
 		gen7_hwsched_hfi_stop(adreno_dev);
@@ -1665,6 +1697,10 @@ static void add_profile_events(struct adreno_device *adreno_dev,
 	info.rb_id = adreno_get_level(context);
 	info.gmu_dispatch_queue = context->gmu_dispatch_queue;
 
+	msm_perf_events_update(MSM_PERF_GFX, MSM_PERF_SUBMIT,
+		pid_nr(context->proc_priv->pid),
+		context->id, drawobj->timestamp,
+		!!(drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME));
 	trace_adreno_cmdbatch_submitted(drawobj, &info, time->ticks,
 		(unsigned long) time_in_s, time_in_ns / 1000, 0);
 

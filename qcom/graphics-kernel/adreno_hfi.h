@@ -275,7 +275,7 @@ static const char * const hfi_memkind_strings[] = {
 /* Host can access */
 #define HFI_MEMFLAG_HOST_ACC		BIT(8)
 
-/* Host initializes the buffer */
+/* Host initializes(zero-init) the buffer */
 #define HFI_MEMFLAG_HOST_INIT		BIT(9)
 
 /* Gfx buffer needs to be secure */
@@ -402,7 +402,7 @@ struct hfi_queue_table {
 	(((id) & 0xFF) | (((prio) & 0xFF) << 8) | \
 	(((rtype) & 0xFF) << 16) | (((stype) & 0xFF) << 24))
 
-#define HFI_RSP_TIMEOUT 100 /* msec */
+#define HFI_RSP_TIMEOUT 1000 /* msec */
 
 #define HFI_IRQ_MSGQ_MASK BIT(0)
 

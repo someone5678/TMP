@@ -6,6 +6,7 @@
 
 #include <dt-bindings/soc/qcom,ipcc.h>
 #include <linux/soc/qcom/msm_hw_fence.h>
+#include <soc/qcom/msm_performance.h>
 
 #include "adreno.h"
 #include "adreno_hfi.h"
@@ -129,6 +130,11 @@ static void _retire_timestamp_only(struct kgsl_drawobj *drawobj)
 	kgsl_sharedmem_writel(device->memstore,
 		KGSL_MEMSTORE_OFFSET(context->id, eoptimestamp),
 		drawobj->timestamp);
+
+	msm_perf_events_update(MSM_PERF_GFX, MSM_PERF_RETIRED,
+		pid_nr(context->proc_priv->pid),
+		context->id, drawobj->timestamp,
+		!!(drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME));
 
 	if (drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME) {
 		atomic64_inc(&drawobj->context->proc_priv->frame_count);
@@ -720,6 +726,13 @@ void adreno_hwsched_trigger(struct adreno_device *adreno_dev)
 	kthread_queue_work(hwsched->worker, &hwsched->work);
 }
 
+static inline void _decrement_submit_now(struct kgsl_device *device)
+{
+	spin_lock(&device->submit_lock);
+	device->submit_now--;
+	spin_unlock(&device->submit_lock);
+}
+
 /**
  * adreno_hwsched_issuecmds() - Issue commmands from pending contexts
  * @adreno_dev: Pointer to the adreno device struct
@@ -729,19 +742,27 @@ void adreno_hwsched_trigger(struct adreno_device *adreno_dev)
 static void adreno_hwsched_issuecmds(struct adreno_device *adreno_dev)
 {
 	struct adreno_hwsched *hwsched = &adreno_dev->hwsched;
+	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
+
+	spin_lock(&device->submit_lock);
+	/* If GPU state is not ACTIVE, schedule the work for later */
+	if (device->skip_inline_submit) {
+		spin_unlock(&device->submit_lock);
+		goto done;
+	}
+	device->submit_now++;
+	spin_unlock(&device->submit_lock);
 
 	/* If the dispatcher is busy then schedule the work for later */
 	if (!mutex_trylock(&hwsched->mutex)) {
-		adreno_hwsched_trigger(adreno_dev);
-		return;
+		_decrement_submit_now(device);
+		goto done;
 	}
 
 	if (!hwsched_in_fault(hwsched))
 		hwsched_issuecmds(adreno_dev);
 
 	if (hwsched->inflight > 0) {
-		struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
-
 		mutex_lock(&device->mutex);
 		kgsl_pwrscale_update(device);
 		kgsl_start_idle_timer(device);
@@ -749,6 +770,11 @@ static void adreno_hwsched_issuecmds(struct adreno_device *adreno_dev)
 	}
 
 	mutex_unlock(&hwsched->mutex);
+	_decrement_submit_now(device);
+	return;
+
+done:
+	adreno_hwsched_trigger(adreno_dev);
 }
 
 /**
@@ -832,11 +858,17 @@ static unsigned int _check_context_state_to_queue_cmds(
 static void _queue_drawobj(struct adreno_context *drawctxt,
 	struct kgsl_drawobj *drawobj)
 {
+	struct kgsl_context *context = drawobj->context;
+
 	/* Put the command into the queue */
 	drawctxt->drawqueue[drawctxt->drawqueue_tail] = drawobj;
 	drawctxt->drawqueue_tail = (drawctxt->drawqueue_tail + 1) %
 			ADRENO_CONTEXT_DRAWQUEUE_SIZE;
 	drawctxt->queued++;
+	msm_perf_events_update(MSM_PERF_GFX, MSM_PERF_QUEUE,
+		pid_nr(context->proc_priv->pid),
+		context->id, drawobj->timestamp,
+		!!(drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME));
 	trace_adreno_cmdbatch_queued(drawobj, drawctxt->queued);
 }
 
@@ -1070,11 +1102,16 @@ static int adreno_hwsched_queue_cmds(struct kgsl_device_private *dev_priv,
 void adreno_hwsched_retire_cmdobj(struct adreno_hwsched *hwsched,
 	struct kgsl_drawobj_cmd *cmdobj)
 {
-	struct kgsl_drawobj *drawobj;
+	struct kgsl_drawobj *drawobj = DRAWOBJ(cmdobj);
 	struct kgsl_mem_entry *entry;
 	struct kgsl_drawobj_profiling_buffer *profile_buffer;
+	struct kgsl_context *context = drawobj->context;
 
-	drawobj = DRAWOBJ(cmdobj);
+	msm_perf_events_update(MSM_PERF_GFX, MSM_PERF_RETIRED,
+		pid_nr(context->proc_priv->pid),
+		context->id, drawobj->timestamp,
+		!!(drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME));
+
 	if (drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME) {
 		atomic64_inc(&drawobj->context->proc_priv->frame_count);
 		atomic_inc(&drawobj->context->proc_priv->period.frames);

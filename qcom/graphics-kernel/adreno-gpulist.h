@@ -1919,6 +1919,7 @@ static const struct adreno_gen7_core adreno_gpu_core_gen7_0_0 = {
 		.bus_width = 32,
 		.snapshot_size = SZ_4M,
 	},
+	.gmu_fw_version = GMU_VERSION(4, 0, 0),
 	.sqefw_name = "a730_sqe.fw",
 	.gmufw_name = "gmu_gen70000.bin",
 	.gmufw_bak_name = "c500_gmu.bin",
@@ -1952,6 +1953,7 @@ static const struct adreno_gen7_core adreno_gpu_core_gen7_0_1 = {
 		.bus_width = 32,
 		.snapshot_size = SZ_4M,
 	},
+	.gmu_fw_version = GMU_VERSION(4, 0, 0),
 	.sqefw_name = "a730_sqe.fw",
 	.gmufw_name = "gmu_gen70000.bin",
 	.gmufw_bak_name = "c500_gmu.bin",
@@ -2042,7 +2044,7 @@ static const struct adreno_gen7_core adreno_gpu_core_gen7_2_0 = {
 		.features = ADRENO_APRIV | ADRENO_IOCOHERENT | ADRENO_IFPC |
 				ADRENO_CONTENT_PROTECTION | ADRENO_ACD |
 				ADRENO_LPAC | ADRENO_BCL | ADRENO_L3_VOTE |
-				ADRENO_DMS,
+				ADRENO_PREEMPTION | ADRENO_DMS,
 		.gpudev = &adreno_gen7_hwsched_gpudev.base,
 		.perfcounters = &adreno_gen7_2_0_perfcounters,
 		.uche_gmem_alignment = SZ_16M,
@@ -2050,6 +2052,7 @@ static const struct adreno_gen7_core adreno_gpu_core_gen7_2_0 = {
 		.bus_width = 32,
 		.snapshot_size = SZ_8M,
 	},
+	.gmu_fw_version = GMU_VERSION(4, 1, 0),
 	.sqefw_name = "a740_sqe.fw",
 	.gmufw_name = "gmu_gen70200.bin",
 	.zap_name = "a740_zap.mbn",
@@ -2075,7 +2078,7 @@ static const struct adreno_gen7_core adreno_gpu_core_gen7_2_1 = {
 		.features = ADRENO_APRIV | ADRENO_IOCOHERENT | ADRENO_IFPC |
 				ADRENO_CONTENT_PROTECTION | ADRENO_LPAC |
 				ADRENO_BCL | ADRENO_L3_VOTE | ADRENO_ACD |
-				ADRENO_DMS,
+				ADRENO_PREEMPTION | ADRENO_DMS,
 		.gpudev = &adreno_gen7_hwsched_gpudev.base,
 		.perfcounters = &adreno_gen7_2_0_perfcounters,
 		.uche_gmem_alignment = SZ_16M,
@@ -2083,6 +2086,7 @@ static const struct adreno_gen7_core adreno_gpu_core_gen7_2_1 = {
 		.bus_width = 32,
 		.snapshot_size = SZ_8M,
 	},
+	.gmu_fw_version = GMU_VERSION(4, 1, 0),
 	.sqefw_name = "a740_sqe.fw",
 	.gmufw_name = "gmu_gen70200.bin",
 	.zap_name = "a740_zap.mbn",
@@ -2116,6 +2120,7 @@ static const struct adreno_gen7_core adreno_gpu_core_gen7_4_0 = {
 		.bus_width = 32,
 		.snapshot_size = SZ_4M,
 	},
+	.gmu_fw_version = GMU_VERSION(4, 0, 7),
 	.sqefw_name = "a730_sqe.fw",
 	.gmufw_name = "gmu_gen70000.bin",
 	.gmufw_bak_name = "c500_gmu.bin",

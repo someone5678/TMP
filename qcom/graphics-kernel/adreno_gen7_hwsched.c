@@ -346,7 +346,7 @@ static int gen7_hwsched_gmu_first_boot(struct adreno_device *adreno_dev)
 	if (ret)
 		return ret;
 
-	ret = gen7_gmu_enable_clks(adreno_dev);
+	ret = gen7_gmu_enable_clks(adreno_dev, GMU_MAX_PWRLEVELS - 1);
 	if (ret)
 		goto gdsc_off;
 
@@ -369,7 +369,9 @@ static int gen7_hwsched_gmu_first_boot(struct adreno_device *adreno_dev)
 
 	gen7_gmu_register_config(adreno_dev);
 
-	gen7_gmu_version_info(adreno_dev);
+	ret = gen7_gmu_version_info(adreno_dev);
+	if (ret)
+		goto clks_gdsc_off;
 
 	if (GMU_VER_MINOR(gmu->ver.hfi) < 2)
 		set_bit(ADRENO_HWSCHED_CTX_BAD_LEGACY, &adreno_dev->hwsched.flags);
@@ -436,7 +438,7 @@ static int gen7_hwsched_gmu_boot(struct adreno_device *adreno_dev)
 	if (ret)
 		return ret;
 
-	ret = gen7_gmu_enable_clks(adreno_dev);
+	ret = gen7_gmu_enable_clks(adreno_dev, GMU_MAX_PWRLEVELS - 1);
 	if (ret)
 		goto gdsc_off;
 
@@ -702,9 +704,8 @@ static void gen7_hwsched_touch_wakeup(struct adreno_device *adreno_dev)
 	set_bit(GMU_PRIV_GPU_STARTED, &gmu->flags);
 
 	device->pwrctrl.last_stat_updated = ktime_get();
-	device->state = KGSL_STATE_ACTIVE;
 
-	trace_kgsl_pwr_set_state(device, KGSL_STATE_ACTIVE);
+	kgsl_pwrctrl_set_state(device, KGSL_STATE_ACTIVE);
 
 done:
 	/*
@@ -744,9 +745,8 @@ static int gen7_hwsched_boot(struct adreno_device *adreno_dev)
 	set_bit(GMU_PRIV_GPU_STARTED, &gmu->flags);
 
 	device->pwrctrl.last_stat_updated = ktime_get();
-	device->state = KGSL_STATE_ACTIVE;
 
-	trace_kgsl_pwr_set_state(device, KGSL_STATE_ACTIVE);
+	kgsl_pwrctrl_set_state(device, KGSL_STATE_ACTIVE);
 
 	return ret;
 }
@@ -818,36 +818,10 @@ static int gen7_hwsched_first_boot(struct adreno_device *adreno_dev)
 	device->pwrscale.devfreq_enabled = true;
 
 	device->pwrctrl.last_stat_updated = ktime_get();
-	device->state = KGSL_STATE_ACTIVE;
 
-	trace_kgsl_pwr_set_state(device, KGSL_STATE_ACTIVE);
+	kgsl_pwrctrl_set_state(device, KGSL_STATE_ACTIVE);
 
 	return 0;
-}
-
-static void reset_preemption_records(struct adreno_device *adreno_dev)
-{
-	struct gen7_hwsched_hfi *hw_hfi = to_gen7_hwsched_hfi(adreno_dev);
-	static struct kgsl_memdesc *preemption_md = NULL;
-	u32 i;
-
-	if (!adreno_is_preemption_enabled(adreno_dev))
-		return;
-
-	if (preemption_md) {
-		memset(preemption_md->hostptr, 0x0, preemption_md->size);
-		return;
-	}
-
-	for (i = 0; i < hw_hfi->mem_alloc_entries; i++) {
-		struct hfi_mem_alloc_desc *desc = &hw_hfi->mem_alloc_table[i].desc;
-
-		if (desc->mem_kind == HFI_MEMKIND_CSW_PRIV_NON_SECURE) {
-			preemption_md = hw_hfi->mem_alloc_table[i].md;
-			memset(preemption_md->hostptr, 0x0, preemption_md->size);
-			return;
-		}
-	}
 }
 
 /**
@@ -952,20 +926,13 @@ no_gx_power:
 
 	clear_bit(GMU_PRIV_GPU_STARTED, &gmu->flags);
 
-	device->state = KGSL_STATE_NONE;
+	kgsl_pwrctrl_set_state(device, KGSL_STATE_NONE);
 
 	del_timer_sync(&device->idle_timer);
 
 	kgsl_pwrscale_sleep(device);
 
 	kgsl_pwrctrl_clear_l3_vote(device);
-
-	/*
-	 * Reset the context records so that CP can start
-	 * at the correct read pointer for BV thread after
-	 * coming out of slumber.
-	 */
-	reset_preemption_records(adreno_dev);
 
 	trace_kgsl_pwr_set_state(device, KGSL_STATE_SLUMBER);
 
@@ -983,12 +950,24 @@ static void hwsched_idle_check(struct work_struct *work)
 	if (test_bit(GMU_DISABLE_SLUMBER, &device->gmu_core.flags))
 		goto done;
 
-	if (!atomic_read(&device->active_cnt)) {
-		gen7_hwsched_power_off(adreno_dev);
-	} else {
+	if (atomic_read(&device->active_cnt)) {
 		kgsl_pwrscale_update(device);
 		kgsl_start_idle_timer(device);
+		goto done;
 	}
+
+	spin_lock(&device->submit_lock);
+	if (device->submit_now) {
+		spin_unlock(&device->submit_lock);
+		kgsl_pwrscale_update(device);
+		kgsl_start_idle_timer(device);
+		goto done;
+	}
+
+	device->skip_inline_submit = true;
+	spin_unlock(&device->submit_lock);
+
+	gen7_hwsched_power_off(adreno_dev);
 
 done:
 	mutex_unlock(&device->mutex);
