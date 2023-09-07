@@ -10,8 +10,6 @@
 #define IClientEnv_OP_registerWithWhitelist 3
 #define IClientEnv_OP_notifyDomainChange 4
 #define IClientEnv_OP_registerWithCredentials 5
-#define IClientEnv_OP_accept 6
-#define IClientEnv_OP_adciShutdown 7
 
 static inline int32_t
 IClientEnv_release(struct Object self)
@@ -117,14 +115,3 @@ IClientEnv_registerWithCredentials(struct Object self, struct Object
 	return result;
 }
 
-static inline int32_t
-IClientEnv_accept(struct Object self)
-{
-	return Object_invoke(self, IClientEnv_OP_accept, 0, 0);
-}
-
-static inline int32_t
-IClientEnv_adciShutdown(struct Object self)
-{
-	return Object_invoke(self, IClientEnv_OP_adciShutdown, 0, 0);
-}
