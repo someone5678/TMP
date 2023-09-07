@@ -23,6 +23,10 @@
 #include "sde_dbg.h"
 #include "dsi_parser.h"
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+#include "dsi_panel_driver.h"
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
+
 #define to_dsi_display(x) container_of(x, struct dsi_display, host)
 #define INT_BASE_10 10
 
@@ -49,7 +53,11 @@ static struct dsi_display_boot_param boot_displays[MAX_DSI_ACTIVE_DISPLAY] = {
 static void dsi_display_panel_id_notification(struct dsi_display *display);
 
 static const struct of_device_id dsi_display_dt_match[] = {
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	{.compatible = "somc,dsi-display"},
+#else
 	{.compatible = "qcom,dsi-display"},
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 	{}
 };
 
@@ -68,6 +76,13 @@ static bool is_sim_panel(struct dsi_display *display)
 
 	return (display->panel->te_using_watchdog_timer ||
 			display->panel->panel_ack_disabled);
+}
+
+static struct dsi_display *main_display;
+
+struct dsi_display *dsi_display_get_main_display(void)
+{
+	return main_display;
 }
 
 static void dsi_display_mask_ctrl_error_interrupts(struct dsi_display *display,
@@ -275,7 +290,11 @@ error:
 	return rc;
 }
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+int dsi_display_cmd_engine_enable(struct dsi_display *display)
+#else
 static int dsi_display_cmd_engine_enable(struct dsi_display *display)
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 {
 	int rc = 0;
 	int i;
@@ -317,7 +336,11 @@ done:
 	return rc;
 }
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+int dsi_display_cmd_engine_disable(struct dsi_display *display)
+#else
 static int dsi_display_cmd_engine_disable(struct dsi_display *display)
+#endif  /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 {
 	int rc = 0;
 	int i;
@@ -3381,8 +3404,7 @@ static int dsi_host_detach(struct mipi_dsi_host *host,
 int dsi_host_transfer_sub(struct mipi_dsi_host *host, struct dsi_cmd_desc *cmd)
 {
 	struct dsi_display *display;
-	struct dsi_display_ctrl *ctrl;
-	int i, rc = 0;
+	int rc = 0;
 
 	if (!host || !cmd) {
 		DSI_ERR("Invalid params\n");
@@ -3394,16 +3416,6 @@ int dsi_host_transfer_sub(struct mipi_dsi_host *host, struct dsi_cmd_desc *cmd)
 	/* Avoid sending DCS commands when ESD recovery is pending */
 	if (atomic_read(&display->panel->esd_recovery_pending)) {
 		DSI_DEBUG("ESD recovery pending\n");
-		display_for_each_ctrl(i, display) {
-			ctrl = &display->ctrl[i];
-			if ((!ctrl) || (!ctrl->ctrl))
-				continue;
-			if ((ctrl->ctrl->pending_cmd_flags & DSI_CTRL_CMD_FETCH_MEMORY) &&
-				ctrl->ctrl->cmd_len != 0) {
-				dsi_ctrl_transfer_cleanup(ctrl->ctrl);
-				ctrl->ctrl->cmd_len = 0;
-			}
-		}
 		return 0;
 	}
 
@@ -4221,6 +4233,15 @@ static int dsi_display_res_init(struct dsi_display *display)
 		}
 	}
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	rc = dsi_panel_driver_create_fs(display);
+	if (rc) {
+		pr_err("%s: failed dsi_panel_driver_create_fs rc=%d\n",
+				__func__, rc);
+		return rc;
+	}
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
+
 	display->panel = dsi_panel_get(&display->pdev->dev,
 				display->panel_node,
 				display->parser_node,
@@ -4262,6 +4283,16 @@ static int dsi_display_res_init(struct dsi_display *display)
 		phy->cfg.split_link.num_sublinks = host->split_link.num_sublinks;
 		phy->cfg.split_link.lanes_per_sublink = host->split_link.lanes_per_sublink;
 	}
+
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	pr_notice("%s: Panel Name = %s\n", __func__, display->panel->name);
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
+
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	if (display->boot_disp->boot_disp_en)
+		display->panel->spec_pdata->display_onoff_state = true;
+	dsi_panel_driver_oled_short_det_init_works(display);
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 
 	rc = dsi_display_parse_lane_map(display);
 	if (rc) {
@@ -5913,6 +5944,9 @@ static int dsi_display_init(struct dsi_display *display)
 			return rc;
 		}
 	}
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	dsi_panel_driver_init_area_count(display->panel);
+#endif  /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 
 	rc = component_add(&pdev->dev, &dsi_display_comp_ops);
 	if (rc)
@@ -6023,6 +6057,10 @@ int dsi_display_dev_probe(struct platform_device *pdev)
 	display->pdev = pdev;
 	display->boot_disp = boot_disp;
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	main_display = display;
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
+
 	dsi_display_parse_cmdline_topology(display, index);
 
 	platform_set_drvdata(pdev, display);
@@ -6091,6 +6129,9 @@ int dsi_display_dev_remove(struct platform_device *pdev)
 			ctrl->ctrl->post_cmd_tx_workq = NULL;
 		}
 	}
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	dsi_panel_driver_deinit_area_count(display->panel);
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 
 	(void)_dsi_display_dev_deinit(display);
 
@@ -8355,7 +8396,6 @@ static int dsi_display_qsync(struct dsi_display *display, bool enable)
 	int rc = 0;
 
 	mutex_lock(&display->display_lock);
-	display->queue_cmd_waits = true;
 
 	display_for_each_ctrl(i, display) {
 		if (enable) {
@@ -8378,7 +8418,6 @@ static int dsi_display_qsync(struct dsi_display *display, bool enable)
 	}
 
 exit:
-	display->queue_cmd_waits = false;
 	SDE_EVT32(enable, display->panel->qsync_caps.qsync_min_fps, rc);
 	mutex_unlock(&display->display_lock);
 	return rc;
