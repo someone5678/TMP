@@ -113,6 +113,8 @@ static ssize_t aud_dev_sysfs_store(struct kobject *kobj,
 	pr_debug("%s: pcm_id %d state %d \n", __func__, pcm_id, state);
 
 	pdata->aud_dev_state[pcm_id] = state;
+	if ( state == DEVICE_ENABLE && (pdata->dsp_sessions_closed != 0))
+		pdata->dsp_sessions_closed = 0;
 
 	ret = count;
 done:
@@ -223,29 +225,22 @@ done:
 static void check_userspace_service_state(struct snd_soc_pcm_runtime *rtd,
 						struct msm_common_pdata *pdata)
 {
-	uint32_t i;
-
 	dev_info(rtd->card->dev,"%s: pcm_id %d state %d\n", __func__,
-			rtd->num, pdata->aud_dev_state[rtd->num]);
+				rtd->num, pdata->aud_dev_state[rtd->num]);
 
-	mutex_lock(&pdata->aud_dev_lock);
 	if (pdata->aud_dev_state[rtd->num] == DEVICE_ENABLE) {
 		dev_info(rtd->card->dev, "%s userspace service crashed\n",
-				__func__);
-		/*Reset the state as sysfs node wont be triggred*/
-		pdata->aud_dev_state[rtd->num] = DEVICE_DISABLE;
-		for (i = 0; i < pdata->num_aud_devs; i++) {
-			if (pdata->aud_dev_state[i] == DEVICE_ENABLE)
-				goto exit;
+					__func__);
+		if (pdata->dsp_sessions_closed == 0) {
+			/*Issue close all graph cmd to DSP*/
+			spf_core_apm_close_all();
+			/*unmap all dma mapped buffers*/
+			msm_audio_ion_crash_handler();
+			pdata->dsp_sessions_closed = 1;
 		}
-		/*Issue close all graph cmd to DSP*/
-		spf_core_apm_close_all();
-		/*unmap all dma mapped buffers*/
-		msm_audio_ion_crash_handler();
+		/*Reset the state as sysfs node wont be triggred*/
+		pdata->aud_dev_state[rtd->num] = 0;
 	}
-exit:
-	mutex_unlock(&pdata->aud_dev_lock);
-	return;
 }
 
 static int get_mi2s_tdm_auxpcm_intf_index(const char *stream_name)
@@ -404,6 +399,11 @@ int msm_common_snd_hw_params(struct snd_pcm_substream *substream,
 	struct msm_common_pdata *pdata = msm_common_get_pdata(card);
 	int index = get_mi2s_tdm_auxpcm_intf_index(stream_name);
 	struct clk_cfg intf_clk_cfg;
+#ifndef ENABLE_WSA
+	struct snd_soc_component *component = NULL;
+	struct snd_soc_dai **dais = rtd->dais;
+	int i;
+#endif
 
 	dev_dbg(rtd->card->dev,
 		"%s: substream = %s  stream = %d\n",
@@ -490,6 +490,17 @@ int msm_common_snd_hw_params(struct snd_pcm_substream *substream,
 						__func__, ret);
 					goto done;
 				}
+#ifndef ENABLE_WSA
+				for (i = rtd->num_cpus; i < (rtd->num_cpus + rtd->num_codecs); i++) {
+					component = dais[i]->component;
+					snd_soc_dai_set_fmt(dais[i],
+							SND_SOC_DAIFMT_CBS_CFS |
+							SND_SOC_DAIFMT_I2S);
+					snd_soc_component_set_sysclk(component, 0, 0,
+							intf_clk_cfg.clk_freq_in_hz,
+							SND_SOC_CLOCK_IN);
+				}
+#endif
 			} else {
 				pr_err("%s: unsupported stream name: %s\n",
 					__func__, stream_name);
@@ -616,7 +627,7 @@ void msm_common_snd_shutdown(struct snd_pcm_substream *substream)
 	}
 }
 
-static void msm_audio_add_qos_request(void)
+static void msm_audio_add_qos_request()
 {
 	int i;
 	int cpu = 0;
@@ -647,7 +658,7 @@ static void msm_audio_add_qos_request(void)
 	}
 }
 
-static void msm_audio_remove_qos_request(void)
+static void msm_audio_remove_qos_request()
 {
 	int cpu = 0;
 	int ret = 0;
@@ -768,7 +779,6 @@ int msm_common_snd_init(struct platform_device *pdev, struct snd_soc_card *card)
 						sizeof(uint8_t), GFP_KERNEL);
 	dev_info(&pdev->dev, "num_links %d \n", card->num_links);
 	common_pdata->num_aud_devs = card->num_links;
-	mutex_init(&common_pdata->aud_dev_lock);
 
 	aud_dev_sysfs_init(common_pdata);
 
@@ -789,7 +799,6 @@ void msm_common_snd_deinit(struct msm_common_pdata *common_pdata)
 
 	msm_audio_remove_qos_request();
 
-	mutex_destroy(&common_pdata->aud_dev_lock);
 	for (count = 0; count < MI2S_TDM_AUXPCM_MAX; count++) {
 		mutex_destroy(&common_pdata->lock[count]);
 	}
@@ -845,7 +854,7 @@ int msm_channel_map_get(struct snd_kcontrol *kcontrol,
 			ch_cnt = tx_ch_cnt;
 		}
 		if (ch_cnt > 2) {
-			pr_err("%s: Incorrect channel count: %d\n", __func__, ch_cnt);
+			pr_err("%s: Incorrect channel count: %d\n", ch_cnt);
 			return -EINVAL;
 		}
 		len = sizeof(uint32_t) * (ch_cnt + 1);
@@ -894,7 +903,9 @@ int msm_channel_map_get(struct snd_kcontrol *kcontrol,
 		/* reset return value from the loop above */
 		ret = 0;
 		if (rx_ch_cnt == 0 && tx_ch_cnt == 0) {
-			pr_debug("%s: incorrect ch map for backend_id:%d, RX Channel Cnt:%d, TX Channel Cnt:%d\n",
+			pr_debug("%s: got incorrect channel map for backend_id:%d, ",
+				"RX Channel Count:%d,"
+				"TX Channel Count:%d\n",
 				__func__, backend_id, rx_ch_cnt, tx_ch_cnt);
 			return ret;
 		}
@@ -1107,20 +1118,16 @@ int msm_common_dai_link_init(struct snd_soc_pcm_runtime *rtd)
 	}
 
 	pdata = devm_kzalloc(dev, sizeof(struct chmap_pdata), GFP_KERNEL);
-	if (!pdata) {
-		ret = -ENOMEM;
-		goto free_backend;
-	}
+	if (!pdata)
+		return -ENOMEM;
 
 	if ((!strncmp(backend_name, "SLIM", strlen("SLIM"))) ||
 		(!strncmp(backend_name, "CODEC_DMA", strlen("CODEC_DMA")))) {
 		ctl_len = strlen(dai_link->stream_name) + 1 +
 				strlen(mixer_ctl_name) + 1;
 		mixer_str = kzalloc(ctl_len, GFP_KERNEL);
-		if (!mixer_str) {
-			ret = -ENOMEM;
-			goto free_backend;
-		}
+		if (!mixer_str)
+			return -ENOMEM;
 
 		snprintf(mixer_str, ctl_len, "%s %s", dai_link->stream_name,
 				mixer_ctl_name);
@@ -1158,15 +1165,13 @@ int msm_common_dai_link_init(struct snd_soc_pcm_runtime *rtd)
 	}
 
 free_mixer_str:
-	if (mixer_str) {
-		kfree(mixer_str);
-		mixer_str = NULL;
-	}
-
-free_backend:
 	if (backend_name) {
 		kfree(backend_name);
 		backend_name = NULL;
+	}
+	if (mixer_str) {
+		kfree(mixer_str);
+		mixer_str = NULL;
 	}
 
 	return ret;

@@ -140,6 +140,7 @@ static void msm_parse_upd_configuration(struct platform_device *pdev,
 {
 	int ret = 0;
 	u32 dt_values[2];
+	struct snd_soc_card *card = NULL;
 
 	if (!pdev || !pdata)
 		return;
@@ -151,6 +152,16 @@ static void msm_parse_upd_configuration(struct platform_device *pdev,
 			__func__, "qcom,upd_backends_used");
 		return;
 	}
+
+	if (!strcmp(pdata->upd_config.backend_used, "wsa")) {
+		card = (struct snd_soc_card *)platform_get_drvdata(pdev);
+		if (strstr(card->name, "wsa883x"))
+			pdata->get_dev_num = wsa883x_codec_get_dev_num;
+		else
+			pdata->get_dev_num = wsa884x_codec_get_dev_num;
+    } else {
+		pdata->get_dev_num = wcd938x_codec_get_dev_num;
+    }
 
 	ret = of_property_read_u32_array(pdev->dev.of_node,
 			"qcom,upd_lpass_reg_addr", dt_values, MAX_EARPA_REG);
@@ -177,6 +188,7 @@ static void msm_set_upd_config(struct snd_soc_pcm_runtime *rtd)
 {
 	int val1 = 0, val2 = 0, ret = 0;
 	u8  dev_num = 0;
+	char cdc_name[DEV_NAME_STR_LEN];
 	struct snd_soc_component *component = NULL;
 	struct msm_asoc_mach_data *pdata = NULL;
 
@@ -190,6 +202,10 @@ static void msm_set_upd_config(struct snd_soc_pcm_runtime *rtd)
 		pr_err_ratelimited("%s: pdata is NULL\n", __func__);
 		return;
 	}
+	if (!pdata->get_dev_num) {
+		pr_err_ratelimited("%s: get_dev_num is NULL\n", __func__);
+		return;
+	}
 
 	if (!pdata->upd_config.ear_pa_hw_reg_cfg.lpass_cdc_rx0_rx_path_ctl_phy_addr ||
 		!pdata->upd_config.ear_pa_hw_reg_cfg.lpass_wr_fifo_reg_phy_addr ||
@@ -198,37 +214,18 @@ static void msm_set_upd_config(struct snd_soc_pcm_runtime *rtd)
 		return;
 	}
 
+	memset(cdc_name, '\0', DEV_NAME_STR_LEN);
 	if (!strcmp(pdata->upd_config.backend_used, "wsa")) {
-		if (pdata->wsa_max_devs > 0) {
-			component = snd_soc_rtdcom_lookup(rtd, "wsa-codec.1");
-			if (!component) {
-				pr_err("%s: %s component is NULL\n", __func__,
-					"wsa-codec.1");
-				return;
-			}
-		} else {
-			pr_err("%s wsa_max_devs are NULL\n", __func__);
-			return;
-		}
-	} else {
-		component = snd_soc_rtdcom_lookup(rtd, WCD938X_DRV_NAME);
-		if (!component) {
-			pr_err("%s component is NULL\n", __func__);
-			return;
-		}
+		if (pdata->wsa_max_devs > 0)
+			memcpy(cdc_name, "wsa-codec.1", strlen("wsa-codec.1"));
 	}
+	else
+		memcpy(cdc_name, WCD938X_DRV_NAME, sizeof(WCD938X_DRV_NAME));
 
-	if (!strcmp(pdata->upd_config.backend_used, "wsa")) {
-		if (strstr(rtd->card->name, "wsa883x"))
-			pdata->get_dev_num = wsa883x_codec_get_dev_num;
-		else
-			pdata->get_dev_num = wsa884x_codec_get_dev_num;
-	} else {
-		pdata->get_dev_num = wcd938x_codec_get_dev_num;
-	}
-
-	if (!pdata->get_dev_num) {
-		pr_err("%s: get_dev_num is NULL\n", __func__);
+	component = snd_soc_rtdcom_lookup(rtd, cdc_name);
+	if (!component) {
+		pr_err_ratelimited("%s: %s component is NULL\n", __func__,
+			cdc_name);
 		return;
 	}
 
@@ -434,7 +431,7 @@ static void *def_wcd_mbhc_cal(void)
 		(sizeof(btn_cfg->_v_btn_low[0]) * btn_cfg->num_btn);
 
 	btn_high[0] = 75;
-	btn_high[1] = 150;
+	btn_high[1] = 137;
 	btn_high[2] = 237;
 	btn_high[3] = 500;
 	btn_high[4] = 500;
@@ -847,6 +844,45 @@ static struct snd_soc_dai_link msm_va_cdc_dma_be_dai_links[] = {
 	},
 };
 
+#ifndef ENABLE_WSA
+static int cs35l45_init(struct snd_soc_pcm_runtime *rtd)
+{
+	struct snd_soc_dai **dais = rtd->dais;
+	struct snd_soc_dapm_context *dapm;
+	int i;
+
+	for (i = rtd->num_cpus; i < (rtd->num_cpus + rtd->num_codecs); i++) {
+
+		dapm = snd_soc_component_get_dapm(dais[i]->component);
+		if (dapm->component->name_prefix == NULL) {
+			pr_debug("%s: name_prefix=NULL\n", __func__);
+			if (snd_soc_dapm_ignore_suspend(dapm, "Playback") < 0)
+				pr_err("%s: ignore suspend failed : Playback\n", __func__);
+			if (snd_soc_dapm_ignore_suspend(dapm, "Capture") < 0)
+				pr_err("%s: ignore suspend failed : Capture\n", __func__);
+			if (snd_soc_dapm_ignore_suspend(dapm, "SPK") < 0)
+				pr_err("%s: ignore suspend failed : SPK\n", __func__);
+			if (snd_soc_dapm_ignore_suspend(dapm, "AP") < 0)
+				pr_err("%s: ignore suspend failed : AP\n", __func__);
+		} else if (!strcmp(dapm->component->name_prefix, "L") ||
+		           !strcmp(dapm->component->name_prefix, "R")) {
+			pr_debug("%s: name_prefix=%s\n", __func__, dapm->component->name_prefix);
+			if (snd_soc_dapm_ignore_suspend(dapm, "Playback") < 0)
+				pr_err("%s: ignore suspend failed : %s Playback\n", __func__, dapm->component->name_prefix);
+			if (snd_soc_dapm_ignore_suspend(dapm, "Capture") < 0)
+				pr_err("%s: ignore suspend failed : %s Capture\n", __func__, dapm->component->name_prefix);
+			if (snd_soc_dapm_ignore_suspend(dapm, "SPK") < 0)
+				pr_err("%s: ignore suspend failed : %s SPK\n", __func__, dapm->component->name_prefix);
+			if (snd_soc_dapm_ignore_suspend(dapm, "AP") < 0)
+				pr_err("%s: ignore suspend failed : %s AP\n", __func__, dapm->component->name_prefix);
+		}
+	}
+	snd_soc_dapm_sync(dapm);
+
+	return 0;
+}
+#endif
+
 /*
  * I2S interface pinctrl mapping
  * ------------------------------------
@@ -974,6 +1010,9 @@ static struct snd_soc_dai_link msm_mi2s_dai_links[] = {
 		.ignore_suspend = 1,
 		.ignore_pmdown_time = 1,
 		SND_SOC_DAILINK_REG(sen_mi2s_rx),
+#ifndef ENABLE_WSA
+		.init = &cs35l45_init,
+#endif
 	},
 	{
 		.name = LPASS_BE_SEN_MI2S_TX,
@@ -1170,6 +1209,22 @@ static struct snd_soc_dai_link msm_kalama_dai_links[
 			ARRAY_SIZE(msm_mi2s_dai_links) +
 			ARRAY_SIZE(msm_tdm_dai_links)];
 
+#ifndef ENABLE_WSA
+static struct snd_soc_codec_conf msm_codec_conf[] = {
+	{
+		.dlc.name = NULL,
+		.dlc.of_node = NULL,
+		.dlc.dai_name = NULL,
+		.name_prefix = "L",
+	},
+	{
+		.dlc.name = NULL,
+		.dlc.of_node = NULL,
+		.dlc.dai_name = NULL,
+		.name_prefix = "R",
+	},
+};
+#endif
 
 static int msm_populate_dai_link_component_of_node(
 					struct snd_soc_card *card)
@@ -1213,6 +1268,16 @@ static int msm_populate_dai_link_component_of_node(
 					ret = -ENODEV;
 					goto err;
 				}
+
+#ifndef ENABLE_WSA
+				if (strcmp(dai_link[i].codecs[j].name, "cs35l45_l") == 0) {
+					/*Left speaker*/
+					msm_codec_conf[0].dlc.of_node = np;
+				} else if (strcmp(dai_link[i].codecs[j].name, "cs35l45_r") == 0) {
+					/*Right speaker*/
+					msm_codec_conf[1].dlc.of_node = np;
+				}
+#endif
 				dai_link[i].codecs[j].of_node = np;
 				dai_link[i].codecs[j].name = NULL;
 			}
@@ -2006,6 +2071,11 @@ static int msm_asoc_machine_probe(struct platform_device *pdev)
 
 	/* parse upd configuration */
 	msm_parse_upd_configuration(pdev, pdata);
+
+#ifndef ENABLE_WSA
+	card->codec_conf = msm_codec_conf;
+	card->num_configs = sizeof(msm_codec_conf) / sizeof(msm_codec_conf[0]);
+#endif
 
 	ret = devm_snd_soc_register_card(&pdev->dev, card);
 	if (ret == -EPROBE_DEFER) {
