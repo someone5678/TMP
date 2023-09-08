@@ -7359,7 +7359,7 @@ __wlan_hdd_cfg80211_get_wifi_info(struct wiphy *wiphy,
 
 	if (tb_vendor[QCA_WLAN_VENDOR_ATTR_WIFI_INFO_DRIVER_VERSION]) {
 		hdd_debug("Rcvd req for Driver version");
-		skb_len += nla_total_size(QWLAN_VERSIONSTR) + 1;
+		skb_len += nla_total_size(strlen(QWLAN_VERSIONSTR) + 1);
 	}
 
 	if (tb_vendor[QCA_WLAN_VENDOR_ATTR_WIFI_INFO_FIRMWARE_VERSION]) {
