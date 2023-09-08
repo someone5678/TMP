@@ -30,6 +30,9 @@
 #include <wlan_cmn_ieee80211.h>
 #include <wlan_mgmt_txrx_utils_api.h>
 #include <reg_services_public_struct.h>
+#ifdef WLAN_FEATURE_11BE_MLO
+#include "wlan_mlo_mgr_public_structs.h"
+#endif
 
 typedef uint16_t wlan_scan_requester;
 typedef uint32_t wlan_scan_id;
@@ -202,7 +205,8 @@ struct channel_info {
  * @rsnxe: Pointer to rsnxe IE
  * @ehtcap: pointer to ehtcap ie
  * @ehtop: pointer to eht op ie
- * @multi_link: pointer to multi link IE
+ * @t2lm: array of pointers to t2lm op ie
+ * @multi_link_bv: pointer to multi link basic variant IE
  * @bwnss_map: pointer to NSS map IE
  * @secchanoff: pointer to secondary chan IE
  * @mdie: pointer to md IE
@@ -269,7 +273,8 @@ struct ie_list {
 	uint8_t *ehtop;
 #endif
 #ifdef WLAN_FEATURE_11BE_MLO
-	uint8_t *multi_link;
+	uint8_t *multi_link_bv;
+	uint8_t *t2lm[WLAN_MAX_T2LM_IE];
 #endif
 	uint8_t *qcn;
 
@@ -672,12 +677,14 @@ typedef struct filter_arg *bss_filter_arg_t;
  * @ALLOW_11N_ONLY: allow only 11n AP
  * @ALLOW_11AC_ONLY: allow only 11ac AP
  * @ALLOW_11AX_ONLY: allow only 11ax AP
+ * @ALLOW_11BE_ONLY: allow only 11be AP
  */
 enum dot11_mode_filter {
 	ALLOW_ALL,
 	ALLOW_11N_ONLY,
 	ALLOW_11AC_ONLY,
 	ALLOW_11AX_ONLY,
+	ALLOW_11BE_ONLY,
 };
 
 /**
