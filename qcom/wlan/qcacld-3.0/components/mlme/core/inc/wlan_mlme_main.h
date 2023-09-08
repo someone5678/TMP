@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2018-2021 The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for
  * any purpose with or without fee is hereby granted, provided that the
@@ -34,6 +34,9 @@
 #include "wlan_connectivity_logging.h"
 
 #define MAC_MAX_ADD_IE_LENGTH       2048
+/* Join probe request Retry  timer default (200)ms */
+#define JOIN_PROBE_REQ_TIMER_MS              200
+#define MAX_JOIN_PROBE_REQ                   5
 
 /*
  * Following time is used to program WOW_TIMER_PATTERN to FW so that FW will
@@ -160,6 +163,7 @@ struct sae_auth_retry {
  * @peer_set_key_wakelock: wakelock to protect peer set key op with firmware
  * @peer_set_key_runtime_wakelock: runtime pm wakelock for set key
  * @is_key_wakelock_set: flag to check if key wakelock is pending to release
+ * @assoc_rsp: assoc rsp IE received during connection
  */
 struct peer_mlme_priv_obj {
 	uint8_t last_pn_valid;
@@ -178,6 +182,7 @@ struct peer_mlme_priv_obj {
 	qdf_wake_lock_t peer_set_key_wakelock;
 	qdf_runtime_lock_t peer_set_key_runtime_wakelock;
 	bool is_key_wakelock_set;
+	struct element_info assoc_rsp;
 };
 
 /**
@@ -224,6 +229,7 @@ struct wlan_mlme_roaming_config {
  * @sae_single_pmk: Details for sae roaming using single pmk
  * @set_pmk_pending: RSO update status of PMK from set_key
  * @sae_auth_ta: SAE pre-auth tx address
+ * @sae_auth_pending:  Roaming SAE auth pending
  */
 struct wlan_mlme_roam {
 	struct wlan_mlme_roam_state_info roam_sm;
@@ -233,6 +239,7 @@ struct wlan_mlme_roam {
 #endif
 	bool set_pmk_pending;
 	struct qdf_mac_addr sae_auth_ta;
+	uint8_t sae_auth_pending;
 };
 
 #ifdef WLAN_FEATURE_MSCS
@@ -369,6 +376,7 @@ struct ft_context {
  * @cckm_ie_len: cckm_ie len
  * @ese_tspec_info: ese tspec info
  * @ext_cap_ie: Ext CAP IE
+ * @assoc_btm_cap: BSS transition management cap used in (re)assoc req
  */
 struct mlme_connect_info {
 	uint8_t timing_meas_cap;
@@ -393,6 +401,7 @@ struct mlme_connect_info {
 #endif
 #endif
 	uint8_t ext_cap_ie[DOT11F_IE_EXTCAP_MAX_LEN + 2];
+	bool assoc_btm_cap;
 };
 
 /** struct wait_for_key_timer - wait for key timer object
@@ -756,6 +765,25 @@ bool mlme_get_reconn_after_assoc_timeout_flag(struct wlan_objmgr_psoc *psoc,
 struct element_info *mlme_get_peer_disconnect_ies(struct wlan_objmgr_vdev *vdev);
 
 /**
+ * mlme_free_peer_assoc_rsp_ie() - Free the peer Assoc resp IE
+ * @peer_priv: Peer priv object
+ *
+ * Return: None
+ */
+void mlme_free_peer_assoc_rsp_ie(struct peer_mlme_priv_obj *peer_priv);
+
+/**
+ * mlme_set_peer_assoc_rsp_ie() - Cache Assoc resp IE send to peer
+ * @psoc: soc object
+ * @peer_addr: Mac address of requesting peer
+ * @ie: pointer for assoc resp IEs
+ *
+ * Return: None
+ */
+void mlme_set_peer_assoc_rsp_ie(struct wlan_objmgr_psoc *psoc,
+				uint8_t *peer_addr, struct element_info *ie);
+
+/**
  * mlme_set_peer_pmf_status() - set pmf status of peer
  * @peer: PEER object
  * @is_pmf_enabled: Carries if PMF is enabled or not
@@ -829,6 +857,22 @@ qdf_freq_t wlan_get_operation_chan_freq_vdev_id(struct wlan_objmgr_pdev *pdev,
  */
 enum QDF_OPMODE wlan_get_opmode_vdev_id(struct wlan_objmgr_pdev *pdev,
 					uint8_t vdev_id);
+
+/**
+ * wlan_vdev_set_dot11mode - Set the dot11mode of the vdev
+ * @mac_mlme_cfg: MAC's MLME config pointer
+ * @device_mode: OPMODE of the vdev
+ * @vdev_mlme: MLME component of the vdev
+ *
+ * Use this API to set the dot11mode of the vdev.
+ * For non-ML type vdev, this API restricts the connection
+ * of vdev to 11ax on 11be capable operation.
+ *
+ * Return: void
+ */
+void wlan_vdev_set_dot11mode(struct wlan_mlme_cfg *mac_mlme_cfg,
+			     enum QDF_OPMODE device_mode,
+			     struct vdev_mlme_obj *vdev_mlme);
 
 /**
  * wlan_is_open_wep_cipher() - check if cipher is open or WEP

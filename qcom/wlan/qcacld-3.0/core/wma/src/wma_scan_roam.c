@@ -226,9 +226,10 @@ QDF_STATUS wma_update_channel_list(WMA_HANDLE handle,
 
 		wma_update_ch_list_11be_params(&ch_params);
 
-		wlan_reg_set_channel_params_for_freq(wma_handle->pdev,
-						     chan_p->mhz, 0,
-						     &ch_params);
+		wlan_reg_set_channel_params_for_pwrmode(wma_handle->pdev,
+							chan_p->mhz, 0,
+							&ch_params,
+							REG_CURRENT_PWR_MODE);
 
 		chan_p->max_bw_supported =
 		     wma_map_phy_ch_bw_to_wmi_channel_width(ch_params.ch_width);
@@ -295,7 +296,8 @@ cm_handle_auth_offload(struct auth_offload_event *auth_event)
 				auth_event->vdev_id,
 				auth_event->ta);
 	status = wma->csr_roam_auth_event_handle_cb(mac_ctx, auth_event->vdev_id,
-						    auth_event->ap_bssid);
+						    auth_event->ap_bssid,
+						    auth_event->akm);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		wma_err_rl("Trigger pre-auth failed");
 		return QDF_STATUS_E_FAILURE;
@@ -559,11 +561,17 @@ wma_roam_update_vdev(tp_wma_handle wma,
 
 	vdev_id = roamed_vdev_id;
 	wma->interfaces[vdev_id].nss = roam_synch_ind_ptr->nss;
-	/* update freq and channel width */
-	wma->interfaces[vdev_id].ch_freq =
-		roam_synch_ind_ptr->chan_freq;
+
+	/* update channel width */
 	wma->interfaces[vdev_id].chan_width =
 		roam_synch_ind_ptr->chan_width;
+	/* Fill link freq from roam_synch_ind */
+	if (is_multi_link_roam(roam_synch_ind_ptr))
+		wma->interfaces[vdev_id].ch_freq =
+			mlo_roam_get_chan_freq(vdev_id, roam_synch_ind_ptr);
+	else
+		wma->interfaces[vdev_id].ch_freq =
+			roam_synch_ind_ptr->chan_freq;
 
 	del_sta_params = qdf_mem_malloc(sizeof(*del_sta_params));
 	if (!del_sta_params) {
@@ -680,9 +688,10 @@ static void wma_update_phymode_on_roam(tp_wma_handle wma,
 			else
 				sec_ch_2g_freq = des_chan->ch_freq - 20;
 		}
-		wlan_reg_set_channel_params_for_freq(pdev, des_chan->ch_freq,
-						     sec_ch_2g_freq,
-						     &ch_params);
+		wlan_reg_set_channel_params_for_pwrmode(pdev, des_chan->ch_freq,
+							sec_ch_2g_freq,
+							&ch_params,
+							REG_CURRENT_PWR_MODE);
 		if (ch_params.ch_width != des_chan->ch_width ||
 		    ch_params.mhz_freq_seg0 != chan->band_center_freq1 ||
 		    ch_params.mhz_freq_seg1 != chan->band_center_freq2)
@@ -1517,7 +1526,7 @@ int wma_extscan_hotlist_match_event_handler(void *handle,
 		return -ENOMEM;
 
 	dest_ap = &dest_hotlist->ap[0];
-	dest_hotlist->numOfAps = event->total_entries;
+	dest_hotlist->numOfAps = numap;
 	dest_hotlist->requestId = event->config_request_id;
 
 	if (event->first_entry_index +

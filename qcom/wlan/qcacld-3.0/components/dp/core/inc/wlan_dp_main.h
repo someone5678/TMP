@@ -657,4 +657,53 @@ void dp_clear_net_dev_stats(struct wlan_dp_intf *dp_intf)
 	qdf_mem_set(&dp_intf->stats, sizeof(dp_intf->stats), 0);
 }
 
+#ifdef FEATURE_DIRECT_LINK
+/**
+ * dp_direct_link_init() - Initializes Direct Link datapath
+ * @dp_ctx: DP private context
+ *
+ * Return: QDF status
+ */
+QDF_STATUS dp_direct_link_init(struct wlan_dp_psoc_context *dp_ctx);
+
+/**
+ * dp_direct_link_deinit() - De-initializes Direct Link datapath
+ * @dp_ctx: DP private context
+ *
+ * Return: None
+ */
+void dp_direct_link_deinit(struct wlan_dp_psoc_context *dp_ctx);
+
+/**
+ * dp_config_direct_link: Set direct link config of vdev
+ * @dp_intf: DP interface handle
+ * @config_direct_link: Flag to enable direct link path
+ * @enable_low_latency: Flag to enable low link latency
+ *
+ * Return: QDF Status
+ */
+QDF_STATUS dp_config_direct_link(struct wlan_dp_intf *dp_intf,
+				 bool config_direct_link,
+				 bool enable_low_latency);
+
+#else
+static inline
+QDF_STATUS dp_direct_link_init(struct wlan_dp_psoc_context *dp_ctx)
+{
+	return QDF_STATUS_SUCCESS;
+}
+
+static inline
+void dp_direct_link_deinit(struct wlan_dp_psoc_context *dp_ctx)
+{
+}
+
+static inline
+QDF_STATUS dp_config_direct_link(struct wlan_dp_intf *dp_intf,
+				 bool config_direct_link,
+				 bool enable_low_latency)
+{
+	return QDF_STATUS_SUCCESS;
+}
+#endif
 #endif

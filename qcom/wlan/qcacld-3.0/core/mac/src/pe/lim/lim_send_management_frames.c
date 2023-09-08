@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2011-2021 The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for
  * any purpose with or without fee is hereby granted, provided that the
@@ -230,6 +230,16 @@ lim_populate_ml_probe_req(struct mac_context *mac,
 
 	return QDF_STATUS_SUCCESS;
 }
+
+static bool
+lim_check_join_req_and_num_of_partner_link(struct pe_session *session)
+{
+	if (session && session->lim_join_req &&
+	    session->lim_join_req->partner_info.num_partner_links)
+		return true;
+
+	return false;
+}
 #else
 static QDF_STATUS
 lim_populate_ml_probe_req(struct mac_context *mac,
@@ -238,6 +248,12 @@ lim_populate_ml_probe_req(struct mac_context *mac,
 			  uint16_t *ml_probe_req_len)
 {
 	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static bool
+lim_check_join_req_and_num_of_partner_link(struct pe_session *session)
+{
+	return false;
 }
 #endif
 
@@ -435,7 +451,8 @@ lim_send_probe_req_mgmt_frame(struct mac_context *mac_ctx,
 	populate_dot11f_he_6ghz_cap(mac_ctx, pesession,
 				    &pr->he_6ghz_band_cap);
 
-	if (IS_DOT11_MODE_EHT(dot11mode) && pesession) {
+	if (IS_DOT11_MODE_EHT(dot11mode) && pesession &&
+	    lim_check_join_req_and_num_of_partner_link(pesession)) {
 		lim_update_session_eht_capable(mac_ctx, pesession);
 		lim_populate_ml_probe_req(mac_ctx, pesession,
 					  &ml_probe_req_ie,
@@ -1632,6 +1649,7 @@ lim_send_assoc_rsp_mgmt_frame(struct mac_context *mac_ctx,
 	bool is_band_2g;
 	uint16_t ie_buf_size;
 	uint16_t mlo_ie_len = 0;
+	struct element_info ie;
 
 	if (!pe_session) {
 		pe_err("pe_session is NULL");
@@ -1886,7 +1904,8 @@ lim_send_assoc_rsp_mgmt_frame(struct mac_context *mac_ctx,
 	if (sta && lim_is_sta_eht_capable(sta) &&
 	    lim_is_mlo_conn(pe_session, sta) &&
 	    lim_is_session_eht_capable(pe_session) &&
-	    wlan_vdev_mlme_is_mlo_ap(pe_session->vdev)) {
+	    wlan_vdev_mlme_is_mlo_ap(pe_session->vdev) &&
+	    (status_code != STATUS_ASSOC_REJECTED_TEMPORARILY)) {
 		pe_debug("Populate mlo IEs");
 		mlo_ie_len = lim_send_assoc_rsp_mgmt_frame_mlo(mac_ctx,
 							       pe_session,
@@ -2058,6 +2077,11 @@ lim_send_assoc_rsp_mgmt_frame(struct mac_context *mac_ctx,
 	    pe_session->opmode == QDF_P2P_CLIENT_MODE ||
 	    pe_session->opmode == QDF_P2P_GO_MODE)
 		tx_flag |= HAL_USE_BD_RATE2_FOR_MANAGEMENT_FRAME;
+
+	ie.ptr = frame + sizeof(tSirMacMgmtHdr) + WLAN_ASSOC_RSP_IES_OFFSET;
+	ie.len = payload - WLAN_ASSOC_RSP_IES_OFFSET;
+
+	mlme_set_peer_assoc_rsp_ie(mac_ctx->psoc, peer_addr, &ie);
 
 	MTRACE(qdf_trace(QDF_MODULE_ID_PE, TRACE_CODE_TX_MGMT,
 			 pe_session->peSessionId, mac_hdr->fc.subType));
@@ -2682,7 +2706,8 @@ lim_send_assoc_req_mgmt_frame(struct mac_context *mac_ctx,
 		vht_enabled = true;
 		if (pe_session->gLimOperatingMode.present &&
 		    pe_session->ch_width == CH_WIDTH_20MHZ &&
-		    frm->VHTCaps.present) {
+		    frm->VHTCaps.present &&
+		    !IS_DOT11_MODE_HE(pe_session->dot11mode)) {
 			populate_dot11f_operating_mode(mac_ctx,
 					&frm->OperatingMode, pe_session);
 		}
@@ -2818,6 +2843,8 @@ lim_send_assoc_req_mgmt_frame(struct mac_context *mac_ctx,
 		 */
 		populate_dot11f_twt_extended_caps(mac_ctx, pe_session,
 						  &frm->ExtCap);
+	} else {
+		wlan_cm_set_assoc_btm_cap(pe_session->vdev, false);
 	}
 
 	if (QDF_STATUS_SUCCESS != lim_strip_supp_op_class_update_struct(mac_ctx,
@@ -3222,6 +3249,40 @@ end:
 }
 
 /**
+ * lim_get_addba_rsp_ptr() - Search the pointer to addba response
+ * @ie: the pointer to entire frame
+ * @ie_len: length of ie
+ *
+ * Host reserved 8 bytes for CCMP header trailer and initialize them
+ * as 0 when rmf enabled & key installed and tx addba rsp frame. So,
+ * search the pointer to addba response and then unpack the frame.
+ *
+ * Return: the pointer to addba response
+ */
+static uint8_t *
+lim_get_addba_rsp_ptr(uint8_t *ie, uint32_t ie_len)
+{
+	uint32_t left = ie_len;
+	uint8_t *ptr = ie;
+	uint8_t category, action;
+	uint32_t addba_rsp_len = sizeof(tDot11faddba_rsp);
+
+	while (left >= addba_rsp_len) {
+		category  = ptr[0];
+		action = ptr[1];
+
+		if (category == ACTION_CATEGORY_BACK &&
+		    action == ADDBA_RESPONSE)
+			return ptr;
+
+		left--;
+		ptr++;
+	}
+
+	return NULL;
+}
+
+/**
  * lim_addba_rsp_tx_complete_cnf() - Confirmation for add BA response OTA
  * @context: pointer to global mac
  * @buf: buffer which is nothing but entire ADD BA frame
@@ -3237,11 +3298,13 @@ static QDF_STATUS lim_addba_rsp_tx_complete_cnf(void *context,
 {
 	struct mac_context *mac_ctx = (struct mac_context *)context;
 	tSirMacMgmtHdr *mac_hdr;
-	tDot11faddba_rsp rsp;
+	tDot11faddba_rsp rsp = {0};
 	void *soc = cds_get_context(QDF_MODULE_ID_SOC);
-	uint32_t frame_len;
+	uint32_t rsp_len;
 	QDF_STATUS status;
 	uint8_t *data;
+	uint8_t *addba_rsp_ptr;
+	uint32_t data_len;
 	struct wmi_mgmt_params *mgmt_params = (struct wmi_mgmt_params *)params;
 
 	if (tx_complete == WMI_MGMT_TX_COMP_TYPE_COMPLETE_OK)
@@ -3261,16 +3324,29 @@ static QDF_STATUS lim_addba_rsp_tx_complete_cnf(void *context,
 		return QDF_STATUS_E_FAILURE;
 	}
 
+	data_len = (uint32_t)qdf_nbuf_get_data_len(buf);
+	if (data_len < (sizeof(*mac_hdr) + sizeof(rsp))) {
+		pe_err("Invalid data len %d", data_len);
+		return QDF_STATUS_E_FAILURE;
+	}
+
+	addba_rsp_ptr = lim_get_addba_rsp_ptr(
+				data + sizeof(*mac_hdr),
+				data_len - sizeof(*mac_hdr));
+	if (!addba_rsp_ptr) {
+		pe_debug("null addba_rsp_ptr");
+		qdf_trace_hex_dump(QDF_MODULE_ID_PE, QDF_TRACE_LEVEL_DEBUG,
+				   (void *)data, data_len);
+		addba_rsp_ptr = (uint8_t *)data + sizeof(*mac_hdr);
+	}
 	mac_hdr = (tSirMacMgmtHdr *)data;
-	qdf_mem_zero((void *)&rsp, sizeof(tDot11faddba_rsp));
-	frame_len = sizeof(rsp);
-	status = dot11f_unpack_addba_rsp(mac_ctx, (uint8_t *)data +
-					 sizeof(*mac_hdr), frame_len,
-					 &rsp, false);
+	rsp_len = sizeof(rsp);
+	status = dot11f_unpack_addba_rsp(mac_ctx, addba_rsp_ptr,
+					 rsp_len, &rsp, false);
 
 	if (DOT11F_FAILED(status)) {
 		pe_err("Failed to unpack and parse (0x%08x, %d bytes)",
-			status, frame_len);
+			status, rsp_len);
 		goto error;
 	}
 
@@ -4155,6 +4231,17 @@ lim_send_disassoc_mgmt_frame(struct mac_context *mac,
 		pe_info("CAC timer is running, drop disassoc from going out");
 		if (waitForAck)
 			lim_send_disassoc_cnf(mac);
+		return;
+	} else if (lim_is_ml_peer_state_disconn(mac, pe_session, peer)) {
+		/**
+		 * Check if disassoc is already sent on link vdev and ML peer
+		 * state is moved to ML_PEER_DISCONN_INITIATED. In which case,
+		 * do not send disassoc on assoc vdev, issue disassoc only if
+		 * this check fails.
+		 */
+		pe_debug("disassoc tx not required for vdev id %d",
+			 pe_session->vdev_id);
+		lim_send_disassoc_cnf(mac);
 		return;
 	}
 	smeSessionId = pe_session->smeSessionId;

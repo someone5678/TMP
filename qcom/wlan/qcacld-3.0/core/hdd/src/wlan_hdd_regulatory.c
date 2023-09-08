@@ -255,6 +255,38 @@ void hdd_update_coex_unsafe_chan_reg_disable(
 }
 #endif
 
+#if defined(CONFIG_AFC_SUPPORT) && defined(CONFIG_BAND_6GHZ)
+static inline
+void hdd_update_afc_config(struct hdd_context *hdd_ctx,
+			   struct reg_config_vars *config_vars)
+{
+	bool enable_6ghz_sp_pwrmode_supp = false;
+	bool afc_disable_timer_check = false;
+	bool afc_disable_request_id_check = false;
+	bool is_afc_reg_noaction = false;
+
+	ucfg_mlme_get_enable_6ghz_sp_mode_support(hdd_ctx->psoc,
+						  &enable_6ghz_sp_pwrmode_supp);
+	config_vars->enable_6ghz_sp_pwrmode_supp = enable_6ghz_sp_pwrmode_supp;
+	ucfg_mlme_get_afc_disable_timer_check(hdd_ctx->psoc,
+					      &afc_disable_timer_check);
+	config_vars->afc_disable_timer_check = afc_disable_timer_check;
+	ucfg_mlme_get_afc_disable_request_id_check(
+				hdd_ctx->psoc, &afc_disable_request_id_check);
+	config_vars->afc_disable_request_id_check =
+				afc_disable_request_id_check;
+	ucfg_mlme_get_afc_reg_noaction(hdd_ctx->psoc,
+				       &is_afc_reg_noaction);
+	config_vars->is_afc_reg_noaction = is_afc_reg_noaction;
+}
+#else
+static inline
+void hdd_update_afc_config(struct hdd_context *hdd_ctx,
+			   struct reg_config_vars *config_vars)
+{
+}
+#endif
+
 static void reg_program_config_vars(struct hdd_context *hdd_ctx,
 				    struct reg_config_vars *config_vars)
 {
@@ -322,6 +354,7 @@ static void reg_program_config_vars(struct hdd_context *hdd_ctx,
 						enable_5dot9_ghz_chan;
 	hdd_update_coex_unsafe_chan_nb_user_prefer(hdd_ctx, config_vars);
 	hdd_update_coex_unsafe_chan_reg_disable(hdd_ctx, config_vars);
+	hdd_update_afc_config(hdd_ctx, config_vars);
 	config_vars->sta_sap_scc_on_indoor_channel =
 		ucfg_policy_mgr_get_sta_sap_scc_on_indoor_chnl(hdd_ctx->psoc);
 }
@@ -473,7 +506,8 @@ static void hdd_modify_wiphy(struct wiphy  *wiphy,
 
 /**
  * hdd_set_dfs_region() - set the dfs_region
- * @dfs_region: the dfs_region to set
+ * @hdd_ctx: HDD context
+ * @dfs_reg: the dfs_region to set
  *
  * Return: void
  */
@@ -668,8 +702,11 @@ static int hdd_regulatory_init_no_offload(struct hdd_context *hdd_ctx,
 
 /**
  * hdd_modify_indoor_channel_state_flags() - modify wiphy flags and cds state
+ * @hdd_ctx: HDD context
  * @wiphy_chan: wiphy channel number
  * @cds_chan: cds channel structure
+ * @chan_enum: enumerated value of the channel
+ * @chan_num: channel number
  * @disable: Disable/enable the flags
  *
  * Modify wiphy flags and cds state if channel is indoor.
@@ -966,6 +1003,7 @@ static void hdd_restore_custom_reg_settings(struct wiphy *wiphy,
 
 /**
  * hdd_restore_reg_flags() - restore regulatory flags
+ * @wiphy: device wiphy
  * @flags: regulatory flags
  *
  * Return: void
@@ -1232,8 +1270,9 @@ static void fill_wiphy_band_channels(struct wiphy *wiphy,
 #ifdef FEATURE_WLAN_CH_AVOID
 /**
  * hdd_ch_avoid_ind() - Avoid notified channels from FW handler
- * @adapter:	HDD adapter pointer
- * @indParam:	Channel avoid notification parameter
+ * @hdd_ctxt: HDD context
+ * @unsafe_chan_list: Channels that are unsafe
+ * @avoid_freq_list: Frequencies to avoid
  *
  * Avoid channel notification from FW handler.
  * FW will send un-safe channel list to avoid over wrapping.
@@ -1370,6 +1409,7 @@ static enum nl80211_dfs_regions dfs_reg_to_nl80211_dfs_regions(
 
 /**
  * hdd_set_dfs_pri_multiplier() - Set dfs_pri_multiplier for ETSI region
+ * @hdd_ctx: HDD context
  * @dfs_region: DFS region
  *
  * Return: none

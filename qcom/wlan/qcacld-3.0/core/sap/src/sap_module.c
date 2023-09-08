@@ -613,8 +613,8 @@ enum phy_ch_width wlan_sap_get_concurrent_bw(struct wlan_objmgr_pdev *pdev,
 					     enum phy_ch_width channel_width)
 {
 	enum hw_mode_bandwidth sta_ch_width;
-	enum phy_ch_width sta_chan_width;
-	bool sta_present, is_con_chan_dfs = false;
+	enum phy_ch_width sta_chan_width = CH_WIDTH_20MHZ;
+	bool sta_present, is_con_chan_dfs = false, is_con_sta_indoor = false;
 	uint8_t sta_vdev_id;
 	uint8_t sta_sap_scc_on_dfs_chnl;
 
@@ -633,12 +633,18 @@ enum phy_ch_width wlan_sap_get_concurrent_bw(struct wlan_objmgr_pdev *pdev,
 		if (wlan_reg_is_dfs_for_freq(pdev, con_ch_freq) ||
 		    sta_chan_width == CH_WIDTH_160MHZ)
 			is_con_chan_dfs = true;
+		else if (WLAN_REG_IS_5GHZ_CH_FREQ(con_ch_freq) &&
+			 wlan_reg_is_freq_indoor(pdev, con_ch_freq))
+			is_con_sta_indoor = true;
 	}
 
-	if (policy_mgr_is_hw_dbs_capable(psoc)) {
-		if (is_con_chan_dfs)
-			channel_width = QDF_MIN(sta_chan_width, channel_width);
-		else if (sta_present && channel_width == CH_WIDTH_160MHZ)
+	if (!policy_mgr_is_hw_dbs_capable(psoc))
+		goto sap_ch_width_check;
+
+	if (is_con_chan_dfs) {
+		channel_width = QDF_MIN(sta_chan_width, channel_width);
+
+		if (sta_present && channel_width == CH_WIDTH_160MHZ)
 			channel_width = CH_WIDTH_80MHZ;
 
 		policy_mgr_get_sta_sap_scc_on_dfs_chnl(
@@ -665,7 +671,12 @@ enum phy_ch_width wlan_sap_get_concurrent_bw(struct wlan_objmgr_pdev *pdev,
 			return QDF_MIN(channel_width, CH_WIDTH_80MHZ);
 
 		return channel_width;
+	} else if (is_con_sta_indoor) {
+		sap_debug("Indoor STA channel width is %d", sta_chan_width);
+		return QDF_MIN(channel_width, sta_chan_width);
 	}
+
+sap_ch_width_check:
 
 	/* if no STA present return max of BW and 80MHZ */
 	if (!sta_present)
@@ -1365,8 +1376,9 @@ wlansap_get_csa_chanwidth_from_phymode(struct sap_context *sap_context,
 	ch_params.ch_width = ch_width;
 	if (sap_phymode_is_eht(sap_context->phyMode))
 		wlan_reg_set_create_punc_bitmap(&ch_params, true);
-	wlan_reg_set_channel_params_for_freq(mac->pdev, chan_freq, sec_ch_freq,
-					     &ch_params);
+	wlan_reg_set_channel_params_for_pwrmode(mac->pdev, chan_freq,
+						sec_ch_freq, &ch_params,
+						REG_CURRENT_PWR_MODE);
 	ch_width = ch_params.ch_width;
 	if (tgt_ch_params)
 		*tgt_ch_params = ch_params;
@@ -1497,9 +1509,10 @@ wlansap_set_chan_params_for_csa(struct mac_context *mac,
 	}
 	if (sap_phymode_is_eht(sap_ctx->phyMode))
 		wlan_reg_set_create_punc_bitmap(&sap_ctx->ch_params, true);
-	wlan_reg_set_channel_params_for_freq(
+	wlan_reg_set_channel_params_for_pwrmode(
 		mac->pdev, target_chan_freq, 0,
-		&mac->sap.SapDfsInfo.new_ch_params);
+		&mac->sap.SapDfsInfo.new_ch_params,
+		REG_CURRENT_PWR_MODE);
 
 	return QDF_STATUS_SUCCESS;
 }
@@ -1605,8 +1618,9 @@ QDF_STATUS wlansap_set_channel_change_with_csa(struct sap_context *sap_ctx,
 
 	if (sap_phymode_is_eht(sap_ctx->phyMode))
 		wlan_reg_set_create_punc_bitmap(&tmp_ch_params, true);
-	wlan_reg_set_channel_params_for_freq(mac->pdev, target_chan_freq, 0,
-					     &tmp_ch_params);
+	wlan_reg_set_channel_params_for_pwrmode(mac->pdev, target_chan_freq, 0,
+						&tmp_ch_params,
+						REG_CURRENT_PWR_MODE);
 	if (sap_ctx->chan_freq == target_chan_freq &&
 	    sap_ctx->ch_params.ch_width == tmp_ch_params.ch_width) {
 		sap_nofl_debug("target freq and bw %d not changed",
@@ -1861,7 +1875,7 @@ wlansap_fill_channel_change_request(struct sap_context *sap_ctx,
 	if (dot11_cfg.ext_rates.numRates) {
 		qdf_mem_copy(req->ext_rates.rate,
 			     dot11_cfg.ext_rates.rate,
-			     sizeof(dot11_cfg.ext_rates.numRates));
+			     dot11_cfg.ext_rates.numRates);
 		qdf_mem_copy(sap_ctx->sap_bss_cfg.extendedRateSet.rate,
 			     dot11_cfg.ext_rates.rate,
 			     dot11_cfg.ext_rates.numRates);
@@ -1941,8 +1955,9 @@ QDF_STATUS wlansap_channel_change_request(struct sap_context *sap_ctx,
 	ch_params = &mac_ctx->sap.SapDfsInfo.new_ch_params;
 	if (sap_phymode_is_eht(sap_ctx->phyMode))
 		wlan_reg_set_create_punc_bitmap(ch_params, true);
-	wlan_reg_set_channel_params_for_freq(mac_ctx->pdev, target_chan_freq,
-			0, ch_params);
+	wlan_reg_set_channel_params_for_pwrmode(mac_ctx->pdev, target_chan_freq,
+						0, ch_params,
+						REG_CURRENT_PWR_MODE);
 	sap_ctx->ch_params = *ch_params;
 	sap_ctx->freq_before_ch_switch = sap_ctx->chan_freq;
 	/* Update the channel as this will be used to
@@ -1966,7 +1981,10 @@ QDF_STATUS wlansap_channel_change_request(struct sap_context *sap_ctx,
 		  sap_ctx->chan_freq, phy_mode, ch_params->ch_width,
 		  ch_params->sec_ch_offset, ch_params->center_freq_seg0,
 		  ch_params->center_freq_seg1);
-
+	policy_mgr_update_indoor_concurrency(mac_ctx->psoc,
+					     wlan_vdev_get_id(sap_ctx->vdev),
+					     sap_ctx->freq_before_ch_switch,
+					     DISCONNECT_WITH_CONCURRENCY);
 	return status;
 }
 
@@ -2022,9 +2040,10 @@ QDF_STATUS wlansap_dfs_send_csa_ie_request(struct sap_context *sap_ctx)
 	if (sap_phymode_is_eht(sap_ctx->phyMode))
 		wlan_reg_set_create_punc_bitmap(
 			&mac->sap.SapDfsInfo.new_ch_params, true);
-	wlan_reg_set_channel_params_for_freq(mac->pdev,
+	wlan_reg_set_channel_params_for_pwrmode(mac->pdev,
 			mac->sap.SapDfsInfo.target_chan_freq,
-			0, &mac->sap.SapDfsInfo.new_ch_params);
+			0, &mac->sap.SapDfsInfo.new_ch_params,
+			REG_CURRENT_PWR_MODE);
 
 	sap_get_cac_dur_dfs_region(sap_ctx, &new_cac_ms, &dfs_region,
 				   mac->sap.SapDfsInfo.target_chan_freq,
@@ -2449,9 +2468,10 @@ wlansap_son_update_sap_config_phymode(struct wlan_objmgr_vdev *vdev,
 		}
 	}
 
-	wlan_reg_set_channel_params_for_freq(pdev, config->chan_freq,
-					     config->sec_ch_freq,
-					     &config->ch_params);
+	wlan_reg_set_channel_params_for_pwrmode(pdev, config->chan_freq,
+						config->sec_ch_freq,
+						&config->ch_params,
+						REG_CURRENT_PWR_MODE);
 
 	return QDF_STATUS_SUCCESS;
 }
@@ -3574,7 +3594,8 @@ qdf_freq_t wlansap_get_chan_band_restrict(struct sap_context *sap_ctx,
 		sap_debug("channel is passive");
 		*csa_reason = CSA_REASON_CHAN_PASSIVE;
 		return wlansap_get_safe_channel_from_pcl_for_sap(sap_ctx);
-	} else if (!policy_mgr_is_safe_channel(mac->psoc, sap_ctx->chan_freq)) {
+	} else if (!policy_mgr_is_sap_freq_allowed(mac->psoc,
+						   sap_ctx->chan_freq)) {
 		sap_debug("channel is unsafe");
 		*csa_reason = CSA_REASON_UNSAFE_CHANNEL;
 		return wlansap_get_safe_channel_from_pcl_and_acs_range(sap_ctx);
