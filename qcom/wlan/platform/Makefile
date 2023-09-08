@@ -25,7 +25,6 @@ KBUILD_OPTIONS += CONFIG_BUS_AUTO_SUSPEND=y
 KBUILD_OPTIONS += KBUILD_EXTRA_SYMBOLS=$(OUT_DIR)/../sm8550-modules/qcom/securemsm-kernel/Module.symvers
 endif
 endif
-endif
 
 all:
 	$(MAKE) -C $(KERNEL_SRC) M=$(M) modules $(KBUILD_OPTIONS)
