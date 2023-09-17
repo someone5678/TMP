@@ -160,6 +160,7 @@ struct panel_specific_pdata {
 
 	int pre_sod_mode;
 
+	int hbm_mode;
 	int hmd_mode;
 
 	int aod_mode;

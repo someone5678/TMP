@@ -2017,6 +2017,8 @@ const char *cmd_set_prop_map[DSI_CMD_SET_MAX] = {
 #ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
 	"somc,mdss-dsi-flm2-on-command",
 	"somc,mdss-dsi-flm2-off-command",
+	"somc,mdss-dsi-hbm-on-command",
+	"somc,mdss-dsi-hbm-off-command",
 	"somc,mdss-dsi-hmd-on-command",
 	"somc,mdss-dsi-hmd-off-command",
 	"somc,mdss-dsi-aod-low-command",
@@ -2053,6 +2055,8 @@ const char *cmd_set_state_map[DSI_CMD_SET_MAX] = {
 #ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
 	"somc,mdss-dsi-flm2-on-command-state",
 	"somc,mdss-dsi-flm2-off-command-state",
+	"somc,mdss-dsi-hbm-on-command-state",
+	"somc,mdss-dsi-hbm-off-command-state",
 	"somc,mdss-dsi-hmd-on-command-state",
 	"somc,mdss-dsi-hmd-off-command-state",
 	"somc,mdss-dsi-aod-low-command-state",
@@ -4742,6 +4746,37 @@ int dsi_panel_set_flm2_mode(struct dsi_panel *panel, int mode)
 
 	return rc;
 
+}
+
+int dsi_panel_set_hbm_mode(struct dsi_panel *panel, int mode)
+{
+	int rc = 0;
+
+	if (panel == NULL) {
+		pr_err("invalid params\n");
+		return -EINVAL;
+	}
+
+	mutex_lock(&panel->panel_lock);
+	if (!panel->spec_pdata->display_onoff_state) {
+		pr_err("%s: Display is off, can't set HBM mode\n", __func__);
+		mutex_unlock(&panel->panel_lock);
+		return -EAGAIN;
+	}
+
+	rc = (mode == 0) ? dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_HBM_OFF) :
+			dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_HBM_ON);
+
+	if (rc != 0)
+		pr_err("[%s] failed to send DSI_CMD_SET_HBM_XX(%d) cmd, rc=%d\n",
+			panel->name, mode, rc);
+	else {
+		panel->spec_pdata->hbm_mode = mode;
+		pr_notice("set HBM mode=%d\n", mode);
+	}
+	mutex_unlock(&panel->panel_lock);
+
+	return rc;
 }
 
 int dsi_panel_set_hmd_mode(struct dsi_panel *panel, int mode)
